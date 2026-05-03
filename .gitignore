@@ -1,0 +1,168 @@
+# =============================================================================
+# Quant — .gitignore (Public repo, 보안 우선)
+# =============================================================================
+# 원칙: 의심스러우면 ignore. 일단 커밋되면 git history에 영구히 남는다.
+# 시크릿 노출 시 즉시 KIS Developers 콘솔에서 키 무효화 + 재발급.
+# =============================================================================
+
+# ===== Secrets — 절대 커밋 금지 =====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*credentials*
+*secret*
+*token*
+!*.example
+!QUANT_GUARDRAILS.md
+# pre-commit 검증 스크립트는 이름에 "token" 포함되어도 커밋되어야 함
+!scripts/precommit/block-tokens.sh
+!scripts/precommit/block-token*.sh
+
+# 클라우드 자격증명
+.aws/
+.gcp/
+.azure/
+gcp-key*.json
+service-account*.json
+
+# SSH
+*.id_rsa
+*.id_ed25519
+known_hosts
+
+# ===== KIS / 금융 API 토큰·세션 =====
+data/.kis_token*.json
+data/.kis_session*
+data/.dart_token*
+data/.naver_token*
+*.token
+*.session
+
+# ===== 거래/계좌 정보 — 실 데이터 절대 노출 금지 =====
+data/trades/
+data/orders/
+data/positions/
+data/account/
+data/portfolio/
+data/live/
+# data/raw, data/processed 는 디렉토리 자체는 유지(.gitkeep), 내용만 무시
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+*.trade
+*.order
+account_*.csv
+account_*.json
+portfolio_*.csv
+portfolio_*.json
+balance_*
+
+# ===== 백테스트/리서치 결과 (개인 분석물, 잔고 노출 가능) =====
+data/backtest/
+data/research/
+data/reports/
+results/
+reports/
+
+# ===== 데이터 캐시 (큰 용량 + 종목 리스트 노출 가능) =====
+data/cache/
+*.parquet
+*.feather
+*.h5
+*.hdf5
+*.db
+*.sqlite
+*.sqlite3
+*.duckdb
+
+# ===== 로그 (PII·계좌·주문 정보 노출 가능) =====
+logs/*.log
+logs/*.log.*
+logs/*.gz
+*.log
+
+# ===== Python 빌드/캐시 =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+*.egg-info/
+build/
+dist/
+pip-wheel-metadata/
+
+# ===== uv =====
+.uv/
+# uv.lock 은 커밋 권장 (재현성). 단, 시크릿 들어갈 일 없음.
+
+# ===== Jupyter — 출력 셀에 잔고/주문 노출 가능 =====
+.ipynb_checkpoints/
+notebooks/*-scratch.ipynb
+notebooks/*-private.ipynb
+notebooks/*-personal.ipynb
+notebooks/.~*.ipynb
+
+# ===== IDE / 에디터 =====
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.history/
+
+# ===== OS =====
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ===== Docker =====
+.docker/
+docker-compose.override.yml
+docker-compose.local.yml
+
+# ===== Terraform / Infra =====
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# ===== Keep directory shells =====
+!data/.gitkeep
+!logs/.gitkeep
+!notebooks/.gitkeep
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# ===== OMC tooling 로컬 상태 (사용자별, 커밋 X) =====
+.omc/
+
+# ===== 임시/스크래치 =====
+tmp/
+temp/
+scratch/
+*.bak
+*.orig
+*.rej

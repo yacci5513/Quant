@@ -1,0 +1,137 @@
+# =============================================================================
+# Quant — Docker Compose
+#
+# 서비스:
+#   - app      : 메인 컨테이너 (트레이딩/백테스트/CLI). 기본은 dev 타겟.
+#   - jupyter  : JupyterLab 분석 환경 (port 8888)
+#   - app-prod : 프로덕션 런타임 (slim, --no-dev). profile=prod로만 기동.
+#
+# 사용:
+#   docker compose up -d app                 # 메인 컨테이너 시작
+#   docker compose up -d jupyter             # 주피터 시작
+#   docker compose --profile prod up -d      # 프로덕션 런타임 기동
+#   docker compose exec app bash             # 셸 진입
+#   docker compose exec app quant hello      # CLI 동작 확인
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # app — 개발용 메인 컨테이너 (코드 bind mount, 핫 리로드 가능)
+  # ---------------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+      platforms:
+        - linux/arm64
+    image: quant:dev
+    container_name: quant-app
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: Asia/Seoul
+      PYTHONPATH: /app/src
+    volumes:
+      - ./src:/app/src:cached
+      - ./tests:/app/tests:cached
+      - ./notebooks:/app/notebooks:cached
+      - ./pyproject.toml:/app/pyproject.toml:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+    working_dir: /app
+    # 컨테이너를 살려두고 exec 위주로 사용 (장시간 데몬은 별도 서비스로 분리)
+    command: ["tail", "-f", "/dev/null"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "quant", "hello"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - quant-net
+
+  # ---------------------------------------------------------------------------
+  # jupyter — JupyterLab (분석/시각화/전략 프로토타이핑)
+  # ---------------------------------------------------------------------------
+  jupyter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+      platforms:
+        - linux/arm64
+    image: quant:dev
+    container_name: quant-jupyter
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: Asia/Seoul
+      PYTHONPATH: /app/src
+      JUPYTER_TOKEN: ${JUPYTER_TOKEN:-changeme}
+    volumes:
+      - ./src:/app/src:cached
+      - ./notebooks:/app/notebooks:cached
+      - ./pyproject.toml:/app/pyproject.toml:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+    working_dir: /app/notebooks
+    command: >
+      jupyter lab
+        --ip=0.0.0.0
+        --port=8888
+        --no-browser
+        --ServerApp.token=${JUPYTER_TOKEN:-changeme}
+        --ServerApp.password=''
+        --ServerApp.root_dir=/app/notebooks
+        --ServerApp.allow_origin='*'
+    ports:
+      - "${JUPYTER_PORT:-8888}:8888"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8888/api"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - quant-net
+
+  # ---------------------------------------------------------------------------
+  # app-prod — 프로덕션 런타임 (실거래 데몬용, profile로 옵트인)
+  # ---------------------------------------------------------------------------
+  app-prod:
+    profiles: ["prod"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      platforms:
+        - linux/arm64
+    image: quant:latest
+    container_name: quant-app-prod
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: Asia/Seoul
+      APP_ENV: production
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "quant", "hello"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - quant-net
+
+networks:
+  quant-net:
+    driver: bridge

@@ -1,0 +1,90 @@
+# =============================================================================
+# pre-commit hooks — 커밋 전 자동 검증 (시크릿/대용량/포맷)
+#
+# 설치 (호스트 1회):
+#   brew install pre-commit  (또는 pip install pre-commit)
+#   pre-commit install
+#
+# 수동 전체 실행:
+#   pre-commit run --all-files
+#
+# 우회 (절대 권장 안 함):
+#   git commit --no-verify     ← 시크릿 슬쩍 들어감, 금지
+# =============================================================================
+
+repos:
+  # ---------------------------------------------------------------------------
+  # 1. 시크릿 탐지 (gitleaks) — Public 리포 1순위 방어선
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+        name: gitleaks (secret detection)
+
+  # ---------------------------------------------------------------------------
+  # 2. 일반 위생: 큰 파일/머지 충돌/시크릿 패턴 차단
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-symlinks
+      - id: destroyed-symlinks
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        exclude: '\.(md|parquet)$'
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: check-executables-have-shebangs
+
+  # ---------------------------------------------------------------------------
+  # 3. 환경변수/토큰/계좌 데이터 커밋 차단 (커스텀)
+  # ---------------------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: block-env-file
+        name: block .env files (allow .env.example only)
+        entry: scripts/precommit/block-env.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+
+      - id: block-token-files
+        name: block token/session/credential files
+        entry: scripts/precommit/block-tokens.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+
+      - id: block-account-data
+        name: block account/trade data files
+        entry: scripts/precommit/block-account-data.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+
+  # ---------------------------------------------------------------------------
+  # 4. Jupyter notebook 출력 자동 제거 (셀 출력에 잔고/주문 노출 위험)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.7.1
+    hooks:
+      - id: nbstripout
+
+  # ---------------------------------------------------------------------------
+  # 5. Python 린트·포매팅 (ruff)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.7
+    hooks:
+      - id: ruff
+        args: ["--fix", "--exit-non-zero-on-fix"]
+      - id: ruff-format
