@@ -57,6 +57,36 @@ def fetch_kospi200_tickers(top_n: int = _KOSPI_DEFAULT_TOP_N) -> list[str]:
     return tickers
 
 
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
+def fetch_kosdaq_top_tickers(top_n: int = 100) -> list[str]:
+    """KOSDAQ 시총 상위 N개. 멀티배거·성장주 후보군 확장용.
+
+    fdr StockListing("KOSDAQ")이 Marcap 미제공일 수 있어 fallback:
+      1순위: Marcap 컬럼 정렬
+      2순위: 인덱스 순(이미 시총 정렬되어 옴)
+    """
+    listing = fdr.StockListing("KOSDAQ")
+    if listing.empty:
+        raise ValueError("FinanceDataReader StockListing(KOSDAQ) 비정상")
+    if "Marcap" in listing.columns and listing["Marcap"].notna().any():
+        listing = listing.dropna(subset=["Marcap"]).sort_values("Marcap", ascending=False)
+    tickers = listing["Code"].head(top_n).tolist()
+    logger.info(f"KOSDAQ 시총 상위 {len(tickers)}개")
+    return tickers
+
+
+def fetch_universe_tickers(
+    *,
+    kospi_top: int = _KOSPI_DEFAULT_TOP_N,
+    kosdaq_top: int = 0,
+) -> list[str]:
+    """KOSPI + (선택)KOSDAQ 통합 유니버스. kosdaq_top=0이면 기존 KOSPI 200만."""
+    tickers = fetch_kospi200_tickers(top_n=kospi_top)
+    if kosdaq_top > 0:
+        tickers = tickers + fetch_kosdaq_top_tickers(top_n=kosdaq_top)
+    return tickers
+
+
 # -----------------------------------------------------------------------------
 # 일봉 OHLCV
 # -----------------------------------------------------------------------------
@@ -198,6 +228,14 @@ def load_value_panel(
 ) -> pd.DataFrame:
     """거래대금(value) 패널 (wide). 유동성 필터용."""
     return _load_panel("value", tickers, base)
+
+
+def load_volume_panel(
+    tickers: Iterable[str] | None = None,
+    base: Path | None = None,
+) -> pd.DataFrame:
+    """거래량(volume, 주수) 패널 (wide). 거래량 급증 시그널용."""
+    return _load_panel("volume", tickers, base)
 
 
 def _load_panel(

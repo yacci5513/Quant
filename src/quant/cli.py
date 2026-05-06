@@ -44,11 +44,22 @@ def data_fetch_krx(
         "-t",
         help="콤마구분 종목코드 (생략 시 KOSPI 200 전체)",
     ),
+    kosdaq_top: int = typer.Option(
+        0,
+        "--kosdaq-top",
+        help="KOSDAQ 시총 상위 N 추가 (0=KOSPI만, 100=꿀종목 후보군 확장)",
+    ),
 ) -> None:
-    """KRX 일봉 데이터 수집 (KOSPI 200 또는 지정 종목)."""
-    from quant.data.price.fetch_krx import fetch_all
+    """KRX 일봉 데이터 수집 (KOSPI 200 + 선택적 KOSDAQ Top-N)."""
+    from quant.data.price.fetch_krx import fetch_all, fetch_universe_tickers
 
-    ticker_list = [t.strip() for t in tickers.split(",")] if tickers else None
+    if tickers:
+        ticker_list = [t.strip() for t in tickers.split(",")]
+    elif kosdaq_top > 0:
+        ticker_list = fetch_universe_tickers(kosdaq_top=kosdaq_top)
+        typer.echo(f"통합 유니버스: KOSPI 200 + KOSDAQ {kosdaq_top} = {len(ticker_list)}종목")
+    else:
+        ticker_list = None  # fetch_all 디폴트 = KOSPI 200
     fetch_all(tickers=ticker_list, years=years)
 
 
