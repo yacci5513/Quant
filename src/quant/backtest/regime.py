@@ -128,5 +128,8 @@ def regime_state(
         "ma_value": ma_val,
         "distance_pct": distance,
         "in_uptrend": in_up,
-        "recommendation": "풀투자 (시장 > MA200)" if in_up else "현금화 (시장 < MA200)",
+        "ma_window": ma_window,
+        "recommendation": (
+            f"풀투자 (시장 > MA{ma_window})" if in_up else f"현금화 (시장 < MA{ma_window})"
+        ),
     }

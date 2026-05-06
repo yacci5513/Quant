@@ -237,10 +237,33 @@ def signal(
         "-S",
         help="시드 금액(원). 입력 시 종목별 매수 금액·수량 계산.",
     ),
+    daily: bool = typer.Option(
+        False,
+        "--daily",
+        "-d",
+        help="매일 알림 모드 — 챔피언(월간 모멘텀+MA100) 기준 5가지 시나리오 자동 판별.",
+    ),
+    ma_window: int = typer.Option(100, "--ma", help="시장 레짐 MA (100=챔피언, 200=보수)"),
+    rebalance_freq: str = typer.Option("BMS", "--freq", help="리밸런싱: BMS|2W-FRI|BQS"),
 ) -> None:
-    """현재 시점 모멘텀 시그널 — 오늘 매수해야 할 종목 N개 출력."""
-    from quant.signal import latest_momentum_signal, render_signal_table
+    """현재 시점 시그널 — 오늘 매수해야 할 종목 또는 매일 알림 (--daily)."""
     from quant.strategies.momentum_topn import MomentumTopNConfig
+
+    if daily:
+        from quant.daily_signal import compute_daily_signal, render_alert
+
+        cfg = MomentumTopNConfig(
+            top_n=top_n,
+            lookback_months=lookback,
+            skip_months=skip,
+            rebalance_freq=rebalance_freq,
+            replace_threshold=0.0,
+        )
+        ds = compute_daily_signal(seed_won=seed, config=cfg, ma_window=ma_window)
+        typer.echo("\n" + render_alert(ds))
+        return
+
+    from quant.signal import latest_momentum_signal, render_signal_table
 
     rows = latest_momentum_signal(
         config=MomentumTopNConfig(top_n=top_n, lookback_months=lookback, skip_months=skip),
