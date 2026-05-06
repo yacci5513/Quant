@@ -215,5 +215,55 @@ def backtest_compare(
     )
 
 
+@app.command()
+def signal(
+    top_n: int = typer.Option(10, "--top-n", "-n"),
+    lookback: int = typer.Option(12, "--lookback", "-l"),
+    skip: int = typer.Option(1, "--skip", "-s"),
+    seed: float | None = typer.Option(
+        None,
+        "--seed",
+        "-S",
+        help="시드 금액(원). 입력 시 종목별 매수 금액·수량 계산.",
+    ),
+) -> None:
+    """현재 시점 모멘텀 시그널 — 오늘 매수해야 할 종목 N개 출력."""
+    from quant.signal import latest_momentum_signal, render_signal_table
+    from quant.strategies.momentum_topn import MomentumTopNConfig
+
+    rows = latest_momentum_signal(
+        config=MomentumTopNConfig(top_n=top_n, lookback_months=lookback, skip_months=skip),
+        seed_won=seed,
+    )
+    typer.echo("\n" + render_signal_table(rows, seed_won=seed))
+
+
+@backtest_app.command("history")
+def backtest_history(
+    top_n: int = typer.Option(10, "--top-n", "-n"),
+    lookback: int = typer.Option(12, "--lookback", "-l"),
+    skip: int = typer.Option(1, "--skip", "-s"),
+) -> None:
+    """리밸런싱별 보유 종목 + 다음 달 수익률 + 종목별 누적 통계."""
+    from quant.backtest.audit import save_log
+    from quant.common.config import get_settings
+    from quant.data.price.fetch_krx import load_close_panel, load_value_panel
+    from quant.strategies.momentum_topn import MomentumTopNConfig, generate_weights
+
+    prices = load_close_panel()
+    values = load_value_panel()
+    if prices.empty:
+        typer.echo("저장된 데이터 없음")
+        raise typer.Exit(1)
+    weights = generate_weights(
+        prices,
+        values=values,
+        config=MomentumTopNConfig(top_n=top_n, lookback_months=lookback, skip_months=skip),
+    )
+    out_dir = get_settings().data_dir / "backtest" / "history"
+    paths = save_log(out_dir, prices, weights)
+    typer.echo(f"\nrebalance log: {paths['log']}\nticker summary: {paths['ticker_summary']}")
+
+
 if __name__ == "__main__":
     app()
