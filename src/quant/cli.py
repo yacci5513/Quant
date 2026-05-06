@@ -238,6 +238,50 @@ def signal(
     typer.echo("\n" + render_signal_table(rows, seed_won=seed))
 
 
+@backtest_app.command("report")
+def backtest_report(
+    top_n: int = typer.Option(10, "--top-n", "-n"),
+    lookback: int = typer.Option(12, "--lookback", "-l"),
+    skip: int = typer.Option(1, "--skip", "-s"),
+    cost_preset: str = typer.Option("bluechip", "--cost"),
+) -> None:
+    """quantstats HTML 풀 리포트 생성 (전략 + 벤치마크 비교)."""
+    from quant.backtest.benchmark import equal_weight_universe
+    from quant.backtest.costs import BLUECHIP_KIS, CONSERVATIVE, SMALLCAP_KIS
+    from quant.backtest.engine import run_backtest
+    from quant.backtest.report import generate_html
+    from quant.common.config import get_settings
+    from quant.data.price.fetch_krx import load_close_panel, load_value_panel
+    from quant.strategies.momentum_topn import MomentumTopNConfig, generate_weights
+
+    presets = {"bluechip": BLUECHIP_KIS, "smallcap": SMALLCAP_KIS, "conservative": CONSERVATIVE}
+    cost = presets.get(cost_preset, BLUECHIP_KIS)
+
+    prices = load_close_panel()
+    values = load_value_panel()
+    if prices.empty:
+        typer.echo("저장된 데이터 없음")
+        raise typer.Exit(1)
+
+    weights = generate_weights(
+        prices,
+        values=values,
+        config=MomentumTopNConfig(top_n=top_n, lookback_months=lookback, skip_months=skip),
+    )
+    res_strategy = run_backtest(prices, weights, cost_model=cost)
+    res_bench = run_backtest(prices, equal_weight_universe(prices), cost_model=cost)
+
+    out_dir = get_settings().data_dir / "backtest" / "report"
+    out_path = out_dir / "momentum_report.html"
+    generate_html(
+        res_strategy.daily_returns,
+        out_path,
+        title=f"Momentum Top-{top_n} (lookback {lookback}m) vs Equal-weight Benchmark",
+        benchmark=res_bench.daily_returns,
+    )
+    typer.echo(f"\nHTML 리포트 저장: {out_path}")
+
+
 @backtest_app.command("history")
 def backtest_history(
     top_n: int = typer.Option(10, "--top-n", "-n"),
