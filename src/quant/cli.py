@@ -173,5 +173,47 @@ def backtest_sweep(
     typer.echo(f"\nresults saved to {out_dir}/")
 
 
+@backtest_app.command("compare")
+def backtest_compare(
+    top_n: int = typer.Option(10, "--top-n", "-n"),
+    lookback: int = typer.Option(12, "--lookback", "-l"),
+    skip: int = typer.Option(1, "--skip", "-s"),
+    mr_short_days: int = typer.Option(5, "--mr-short-days"),
+    mr_long_months: int = typer.Option(12, "--mr-long-months"),
+    mr_top_n: int = typer.Option(10, "--mr-top-n"),
+    cost_preset: str = typer.Option("bluechip", "--cost"),
+) -> None:
+    """모멘텀 vs 평균회귀 vs 결합 vs 벤치마크 비교."""
+    from quant.backtest.compare import run_compare
+    from quant.backtest.costs import BLUECHIP_KIS, CONSERVATIVE, SMALLCAP_KIS
+    from quant.common.config import get_settings
+    from quant.data.price.fetch_krx import load_close_panel, load_value_panel
+    from quant.strategies.mean_reversion import MeanReversionConfig
+    from quant.strategies.momentum_topn import MomentumTopNConfig
+
+    presets = {"bluechip": BLUECHIP_KIS, "smallcap": SMALLCAP_KIS, "conservative": CONSERVATIVE}
+    cost = presets.get(cost_preset, BLUECHIP_KIS)
+
+    prices = load_close_panel()
+    values = load_value_panel()
+    if prices.empty:
+        typer.echo("저장된 데이터 없음")
+        raise typer.Exit(1)
+
+    out_dir = get_settings().data_dir / "backtest" / "compare"
+    run_compare(
+        prices,
+        values=values,
+        momentum_cfg=MomentumTopNConfig(top_n=top_n, lookback_months=lookback, skip_months=skip),
+        meanrev_cfg=MeanReversionConfig(
+            short_lookback_days=mr_short_days,
+            long_lookback_months=mr_long_months,
+            top_n=mr_top_n,
+        ),
+        cost_model=cost,
+        out_dir=out_dir,
+    )
+
+
 if __name__ == "__main__":
     app()
