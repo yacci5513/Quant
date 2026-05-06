@@ -309,5 +309,98 @@ def backtest_history(
     typer.echo(f"\nrebalance log: {paths['log']}\nticker summary: {paths['ticker_summary']}")
 
 
+@backtest_app.command("ensemble")
+def backtest_ensemble(
+    momentum_alloc: float = typer.Option(0.6, "--mom-alloc", help="모멘텀 비중"),
+    lowvol_alloc: float = typer.Option(0.4, "--lv-alloc", help="저변동성 비중"),
+    top_n: int = typer.Option(10, "--top-n", "-n"),
+    lookback: int = typer.Option(12, "--lookback", "-l"),
+    cost_preset: str = typer.Option("bluechip", "--cost"),
+) -> None:
+    """모멘텀 + 저변동성 앙상블 백테스트 (분산 효과 확인용)."""
+    from quant.backtest.benchmark import equal_weight_universe
+    from quant.backtest.costs import BLUECHIP_KIS, CONSERVATIVE, SMALLCAP_KIS
+    from quant.backtest.engine import run_backtest
+    from quant.backtest.ensemble import StrategyAllocation, combine
+    from quant.data.price.fetch_krx import load_close_panel, load_value_panel
+    from quant.strategies.low_volatility import LowVolatilityConfig
+    from quant.strategies.low_volatility import generate_weights as lv_w
+    from quant.strategies.momentum_topn import MomentumTopNConfig
+    from quant.strategies.momentum_topn import generate_weights as mom_w
+
+    presets = {"bluechip": BLUECHIP_KIS, "smallcap": SMALLCAP_KIS, "conservative": CONSERVATIVE}
+    cost = presets.get(cost_preset, BLUECHIP_KIS)
+
+    prices = load_close_panel()
+    values = load_value_panel()
+    if prices.empty:
+        typer.echo("저장된 데이터 없음 — quant data fetch-krx 먼저 실행")
+        raise typer.Exit(1)
+
+    mom = mom_w(
+        prices, values=values, config=MomentumTopNConfig(top_n=top_n, lookback_months=lookback)
+    )
+    lv = lv_w(prices, values=values, config=LowVolatilityConfig(top_n=top_n))
+    combined = combine(
+        [
+            StrategyAllocation("momentum", mom, momentum_alloc),
+            StrategyAllocation("low_vol", lv, lowvol_alloc),
+        ]
+    )
+    res = run_backtest(prices, combined, cost_model=cost)
+    bench = run_backtest(prices, equal_weight_universe(prices), cost_model=cost)
+    typer.echo(f"\n앙상블 ({momentum_alloc * 100:.0f}/{lowvol_alloc * 100:.0f}):")
+    typer.echo(res.metrics.summary())
+    typer.echo("\n벤치마크:")
+    typer.echo(bench.metrics.summary())
+
+
+@backtest_app.command("report-kr")
+def backtest_report_kr(
+    top_n: int = typer.Option(10, "--top-n", "-n"),
+    lookback: int = typer.Option(12, "--lookback", "-l"),
+    cost_preset: str = typer.Option("bluechip", "--cost"),
+) -> None:
+    """한국어 HTML 리포트 (자체 generator, 가드레일 경고 포함)."""
+    from quant.backtest.benchmark import equal_weight_universe
+    from quant.backtest.costs import BLUECHIP_KIS, CONSERVATIVE, SMALLCAP_KIS
+    from quant.backtest.engine import run_backtest
+    from quant.backtest.report_kr import build_sections_from_result, render_html
+    from quant.common.config import get_settings
+    from quant.data.price.fetch_krx import load_close_panel, load_value_panel
+    from quant.strategies.momentum_topn import MomentumTopNConfig, generate_weights
+
+    presets = {"bluechip": BLUECHIP_KIS, "smallcap": SMALLCAP_KIS, "conservative": CONSERVATIVE}
+    cost = presets.get(cost_preset, BLUECHIP_KIS)
+
+    prices = load_close_panel()
+    values = load_value_panel()
+    if prices.empty:
+        typer.echo("저장된 데이터 없음 — quant data fetch-krx 먼저 실행")
+        raise typer.Exit(1)
+
+    weights = generate_weights(
+        prices, values=values, config=MomentumTopNConfig(top_n=top_n, lookback_months=lookback)
+    )
+    res = run_backtest(prices, weights, cost_model=cost)
+    bench = run_backtest(prices, equal_weight_universe(prices), cost_model=cost)
+
+    sections = build_sections_from_result(
+        res,
+        title=f"모멘텀 Top-{top_n} ({lookback}개월 lookback) 한국어 리포트",
+        benchmark_result=bench,
+        config_summary={
+            "전략": "모멘텀 Top-N",
+            "top_n": top_n,
+            "lookback": f"{lookback}개월",
+            "리밸런싱": "월 1회 (BMS)",
+            "비용 프리셋": cost_preset,
+        },
+    )
+    out_dir = get_settings().data_dir / "backtest" / "report_kr"
+    out = render_html(sections, out_dir / "momentum_kr.html")
+    typer.echo(f"\n한국어 리포트: {out}")
+
+
 if __name__ == "__main__":
     app()

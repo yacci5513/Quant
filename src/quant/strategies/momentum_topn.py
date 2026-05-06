@@ -32,6 +32,11 @@ class MomentumTopNConfig:
     top_n: int = 10  # 선정 종목 수
     min_avg_value: float = 1e9  # 일평균 거래대금 필터 (10억 원)
     rebalance_freq: str = "BMS"  # Business Month Start (월초 영업일)
+    replace_threshold: float = 0.0
+    """기존 보유 → 신규 후보 교체 임계값.
+    0.0 = 매번 top-N으로 무조건 갱신 (현재 베이스라인).
+    0.2 = 신규 후보가 기존 약체 종목보다 모멘텀 점수 +20% 이상일 때만 교체.
+    높일수록 매매 빈도 ↓, 비용 ↓, 시그널 안정성 ↑."""
 
 
 def _momentum_score(prices: pd.DataFrame, cfg: MomentumTopNConfig) -> pd.DataFrame:
@@ -47,6 +52,64 @@ def _momentum_score(prices: pd.DataFrame, cfg: MomentumTopNConfig) -> pd.DataFra
     end = prices.shift(skip_days)
     start = prices.shift(lookback_days)
     return end / start - 1.0
+
+
+def _select_with_threshold(
+    *,
+    scores: pd.Series,
+    current: set[str],
+    top_n: int,
+    threshold: float,
+) -> set[str]:
+    """Threshold 기반 점진적 포지션 갱신.
+
+    threshold=0  → 매번 nlargest(top_n)로 무조건 갱신 (베이스라인).
+    threshold>0  → 기존 보유 중 점수 NaN(상폐/거래정지)는 자동 제외.
+                   빈 자리는 상위 비보유 종목으로 채움.
+                   기존 보유 약체 vs 비보유 강자: 강자 점수가 약체 × (1+threshold) 이상일 때만 교체.
+
+    "신규 진입 후보가 충분히 강할 때만 거래"하도록 만들어
+    시그널 노이즈에 의한 미세 교체를 줄인다.
+    """
+    if threshold <= 0 or not current:
+        return set(scores.nlargest(top_n).index)
+
+    # 1. 기존 보유 중 시그널이 있는 종목만 유지 (NaN/상폐 제외)
+    held_scores = scores[scores.index.isin(current)].dropna()
+    new_held = set(held_scores.index)
+
+    # 2. 빈 자리(top_n - 보유) 만큼 비보유 상위로 채움 (자유 채움 — 임계 무관)
+    non_held = scores[~scores.index.isin(current)].dropna().sort_values(ascending=False)
+    free_slots = top_n - len(new_held)
+    for ticker in non_held.index[:free_slots]:
+        new_held.add(ticker)
+    non_held = non_held.iloc[free_slots:]
+
+    # 3. 약체 보유 vs 강자 비보유 페어와이즈 비교
+    if len(new_held) >= top_n and not non_held.empty:
+        held_sorted = held_scores.sort_values()  # ascending = 약한 순
+        candidates = non_held.copy()
+        for weak_ticker, weak_score in held_sorted.items():
+            if candidates.empty or weak_ticker not in new_held:
+                break
+            best_ticker = candidates.index[0]
+            best_score = candidates.iloc[0]
+            if _beats_threshold(best_score, weak_score, threshold):
+                new_held.discard(weak_ticker)
+                new_held.add(best_ticker)
+                candidates = candidates.iloc[1:]
+            else:
+                break
+
+    return new_held
+
+
+def _beats_threshold(new_score: float, old_score: float, threshold: float) -> bool:
+    """new가 old를 threshold만큼 이기는지. 음수 점수도 안전하게 처리."""
+    if old_score >= 0:
+        return new_score > old_score * (1.0 + threshold)
+    # old가 음수면 곱셈 의미 반전 → 절대 차이로 판정
+    return new_score > old_score + abs(old_score) * threshold
 
 
 def _liquidity_mask(value_panel: pd.DataFrame, cfg: MomentumTopNConfig) -> pd.DataFrame:
@@ -105,14 +168,24 @@ def generate_weights(
     # 5. 각 리밸런싱 일자에 Top-N 선정 → 동일 가중치
     weights = pd.DataFrame(0.0, index=prices.index, columns=prices.columns, dtype=float)
     skipped = 0
+    current_held: set[str] = set()
     for d in rb_idx:
         scores = momentum.loc[d].dropna()
         if len(scores) < cfg.top_n:
             skipped += 1
             continue
-        top = scores.nlargest(cfg.top_n).index
+        new_held = _select_with_threshold(
+            scores=scores,
+            current=current_held,
+            top_n=cfg.top_n,
+            threshold=cfg.replace_threshold,
+        )
         weights.loc[d, :] = 0.0
-        weights.loc[d, top] = 1.0 / cfg.top_n
+        if new_held:
+            w = 1.0 / len(new_held)
+            for t in new_held:
+                weights.loc[d, t] = w
+        current_held = new_held
 
     # 6. 리밸런싱 사이 forward-fill — 보유 유지
     # rebalance 일자엔 새 값, 사이엔 직전 유지. 그 외(처음)는 0.
