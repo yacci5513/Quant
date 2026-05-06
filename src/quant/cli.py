@@ -81,5 +81,97 @@ def backtest_momentum(
     )
 
 
+@backtest_app.command("walkforward")
+def backtest_walkforward(
+    top_n: int = typer.Option(10, "--top-n", "-n"),
+    lookback: int = typer.Option(12, "--lookback", "-l"),
+    skip: int = typer.Option(1, "--skip", "-s"),
+    train_years: int = typer.Option(1, "--train-years", help="학습 윈도우(년)"),
+    test_months: int = typer.Option(6, "--test-months", help="OOS 테스트 윈도우(개월)"),
+    step_months: int = typer.Option(6, "--step-months", help="윈도우 슬라이딩 간격(개월)"),
+    cost_preset: str = typer.Option("bluechip", "--cost"),
+) -> None:
+    """Walk-forward 검증 (rolling 윈도우별 OOS Sharpe·CAGR 분포)."""
+    from quant.backtest.costs import BLUECHIP_KIS, CONSERVATIVE, SMALLCAP_KIS
+    from quant.backtest.walkforward import run_walk_forward
+    from quant.common.config import get_settings
+    from quant.data.price.fetch_krx import load_close_panel, load_value_panel
+    from quant.strategies.momentum_topn import MomentumTopNConfig, generate_weights
+
+    presets = {"bluechip": BLUECHIP_KIS, "smallcap": SMALLCAP_KIS, "conservative": CONSERVATIVE}
+    cost = presets.get(cost_preset, BLUECHIP_KIS)
+
+    prices = load_close_panel()
+    values = load_value_panel()
+    if prices.empty:
+        typer.echo("저장된 데이터 없음 — quant data fetch-krx 먼저 실행")
+        raise typer.Exit(1)
+
+    weights = generate_weights(
+        prices,
+        values=values,
+        config=MomentumTopNConfig(top_n=top_n, lookback_months=lookback, skip_months=skip),
+    )
+    summary = run_walk_forward(
+        prices,
+        weights,
+        train_years=train_years,
+        test_months=test_months,
+        step_months=step_months,
+        cost_model=cost,
+    )
+
+    out_dir = get_settings().data_dir / "backtest" / "walkforward"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summary.per_window.to_csv(out_dir / "windows.csv", index=False)
+    typer.echo(f"\nresults saved to {out_dir / 'windows.csv'}")
+
+
+@backtest_app.command("sweep")
+def backtest_sweep(
+    top_n_list: str = typer.Option("5,10,20", "--top-n-grid"),
+    lookback_list: str = typer.Option("3,6,12", "--lookback-grid"),
+    skip: int = typer.Option(1, "--skip", "-s"),
+    cost_preset: str = typer.Option("bluechip", "--cost"),
+) -> None:
+    """파라미터 그리드 스윕 (top_n × lookback)."""
+    from quant.backtest.costs import BLUECHIP_KIS, CONSERVATIVE, SMALLCAP_KIS
+    from quant.backtest.plot import plot_sweep_heatmap
+    from quant.backtest.sweep import run_sweep
+    from quant.common.config import get_settings
+    from quant.data.price.fetch_krx import load_close_panel, load_value_panel
+
+    presets = {"bluechip": BLUECHIP_KIS, "smallcap": SMALLCAP_KIS, "conservative": CONSERVATIVE}
+    cost = presets.get(cost_preset, BLUECHIP_KIS)
+
+    prices = load_close_panel()
+    values = load_value_panel()
+    if prices.empty:
+        typer.echo("저장된 데이터 없음 — quant data fetch-krx 먼저 실행")
+        raise typer.Exit(1)
+
+    top_n_grid = [int(x) for x in top_n_list.split(",")]
+    lookback_grid = [int(x) for x in lookback_list.split(",")]
+
+    res = run_sweep(
+        prices,
+        values=values,
+        top_n_grid=top_n_grid,
+        lookback_grid=lookback_grid,
+        skip_months=skip,
+        cost_model=cost,
+    )
+
+    out_dir = get_settings().data_dir / "backtest" / "sweep"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    res.df.to_csv(out_dir / "sweep_results.csv", index=False)
+
+    fig = plot_sweep_heatmap(res.pivot("sharpe"), title="Sharpe by (top_n × lookback)")
+    fig.savefig(out_dir / "sweep_sharpe.png", dpi=120)
+    fig2 = plot_sweep_heatmap(res.pivot("cagr"), title="CAGR by (top_n × lookback)", cmap="RdYlGn")
+    fig2.savefig(out_dir / "sweep_cagr.png", dpi=120)
+    typer.echo(f"\nresults saved to {out_dir}/")
+
+
 if __name__ == "__main__":
     app()

@@ -84,6 +84,7 @@ def run(
     # 6. 저장
     if save:
         _save_results(out_dir, prices, weights, is_res, oos_res, cfg, cost)
+        _save_plots(out_dir, is_res, oos_res)
         logger.info(f"결과 저장: {out_dir}")
 
 
@@ -144,6 +145,20 @@ def _save_results(
         "oos": _metrics_to_dict(oos_res.metrics, oos_res.n_rebalances, oos_res.avg_n_holdings),
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
+
+
+def _save_plots(out_dir: Path, is_res, oos_res) -> None:
+    from quant.backtest.plot import save_all
+
+    paths = save_all(
+        out_dir / "plots",
+        equity_is=is_res.equity_curve,
+        equity_oos=oos_res.equity_curve,
+        returns_is=is_res.daily_returns,
+        returns_oos=oos_res.daily_returns,
+    )
+    for name, p in paths.items():
+        logger.info(f"  plot {name}: {p}")
 
 
 def _metrics_to_dict(m: Metrics, n_rebal: int, avg_holdings: float) -> dict:
