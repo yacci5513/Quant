@@ -64,18 +64,8 @@ class Settings(BaseSettings):
     kis_base_url_paper: str = "https://openapivts.koreainvestment.com:29443"
     kis_base_url_live: str = "https://openapi.koreainvestment.com:9443"
 
-    # ----- Phase 2: 뉴스/공시 -----
+    # ----- DART (전자공시) -----
     dart_api_key: SecretStr = SecretStr("")
-    naver_client_id: SecretStr = SecretStr("")
-    naver_client_secret: SecretStr = SecretStr("")
-
-    # ----- Phase 2: NLP (선택) -----
-    anthropic_api_key: SecretStr = SecretStr("")
-    openai_api_key: SecretStr = SecretStr("")
-
-    # ----- Jupyter -----
-    jupyter_token: SecretStr = SecretStr("changeme")
-    jupyter_port: int = 8888
 
     # ---- Computed ----
     @property

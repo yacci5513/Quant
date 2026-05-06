@@ -3,12 +3,10 @@
 #
 # 서비스:
 #   - app      : 메인 컨테이너 (트레이딩/백테스트/CLI). 기본은 dev 타겟.
-#   - jupyter  : JupyterLab 분석 환경 (port 8888)
 #   - app-prod : 프로덕션 런타임 (slim, --no-dev). profile=prod로만 기동.
 #
 # 사용:
 #   docker compose up -d app                 # 메인 컨테이너 시작
-#   docker compose up -d jupyter             # 주피터 시작
 #   docker compose --profile prod up -d      # 프로덕션 런타임 기동
 #   docker compose exec app bash             # 셸 진입
 #   docker compose exec app quant hello      # CLI 동작 확인
@@ -47,53 +45,6 @@ services:
     healthcheck:
       test: ["CMD", "quant", "hello"]
       interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    networks:
-      - quant-net
-
-  # ---------------------------------------------------------------------------
-  # jupyter — JupyterLab (분석/시각화/전략 프로토타이핑)
-  # ---------------------------------------------------------------------------
-  jupyter:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: dev
-      platforms:
-        - linux/arm64
-    image: quant:dev
-    container_name: quant-jupyter
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      TZ: Asia/Seoul
-      PYTHONPATH: /app/src
-      JUPYTER_TOKEN: ${JUPYTER_TOKEN:-changeme}
-    volumes:
-      - ./src:/app/src:cached
-      - ./notebooks:/app/notebooks:cached
-      - ./pyproject.toml:/app/pyproject.toml:ro
-      - ./data:/app/data
-      - ./logs:/app/logs
-    working_dir: /app/notebooks
-    command: >
-      jupyter lab
-        --ip=0.0.0.0
-        --port=8888
-        --no-browser
-        --ServerApp.token=${JUPYTER_TOKEN:-changeme}
-        --ServerApp.password=''
-        --ServerApp.root_dir=/app/notebooks
-        --ServerApp.allow_origin='*'
-    ports:
-      - "${JUPYTER_PORT:-8888}:8888"
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8888/api"]
-      interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
