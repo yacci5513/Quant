@@ -56,15 +56,20 @@ def run_backtest(
     *,
     cost_model: CostModel = BLUECHIP_KIS,
     init_cash: float = 10_000_000.0,
+    auto_shift_weights: bool = True,
 ) -> BacktestResult:
     """가중치 기반 백테스트.
 
     prices: 일별 종가 패널 (index=date, columns=ticker)
     weights: 일별 목표 가중치 (0~1, 합 ≤ 1.0). 리밸런싱 일자에만 값,
              나머지는 NaN 또는 직전 값 forward-fill 가능.
+    auto_shift_weights: True면 weights를 한 영업일 .shift(1)해서 적용.
+        해석: "t 시점 종가로 계산한 시그널은 t+1에 매수 → t+1 수익부터 반영".
+        가드레일 §3 룩어헤드 자동 보호. False면 기존 동작 (호출자 책임).
 
     가드레일:
-    - 호출자가 weights를 이미 .shift(1)로 미래 참조 회피해야 함 (§3)
+    - 매일 빈도 + breakout 결합 시 발견된 lookahead 누출 자동 차단
+    - 격주 이하 빈도엔 영향 미미 (가중치 변경 드물어 +0~0.5% 차이)
     - prices/weights 인덱스 정렬 검증
     - 가중치 합 1.0 초과 경고
     """
@@ -75,6 +80,10 @@ def run_backtest(
     common_idx = prices.index.intersection(weights.index)
     px = prices.loc[common_idx, common_cols].astype(float)
     w = weights.loc[common_idx, common_cols].astype(float).fillna(0.0)
+
+    # 가드레일 §3: 룩어헤드 자동 보호 — t 종가 시그널을 t+1 매수로 해석
+    if auto_shift_weights:
+        w = w.shift(1).fillna(0.0)
 
     # 일별 종목 수익률
     rets = px.pct_change().fillna(0.0)
