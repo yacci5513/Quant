@@ -14,7 +14,9 @@ app = typer.Typer(
 )
 
 data_app = typer.Typer(name="data", help="데이터 수집/관리")
+backtest_app = typer.Typer(name="backtest", help="백테스트 실행/분석")
 app.add_typer(data_app)
+app.add_typer(backtest_app)
 
 
 # ----- 루트 -----
@@ -48,6 +50,35 @@ def data_fetch_krx(
 
     ticker_list = [t.strip() for t in tickers.split(",")] if tickers else None
     fetch_all(tickers=ticker_list, years=years)
+
+
+# ----- backtest -----
+@backtest_app.command("momentum")
+def backtest_momentum(
+    top_n: int = typer.Option(10, "--top-n", "-n", help="상위 N 종목"),
+    lookback: int = typer.Option(12, "--lookback", "-l", help="모멘텀 윈도우(개월)"),
+    skip: int = typer.Option(1, "--skip", "-s", help="최근 제외 개월"),
+    min_value_won: float = typer.Option(
+        1e9, "--min-value", help="유동성 필터: 일평균 거래대금 임계(원)"
+    ),
+    is_ratio: float = typer.Option(0.7, "--is-ratio", help="In-Sample 비율"),
+    cost_preset: str = typer.Option(
+        "bluechip", "--cost", help="비용 프리셋: bluechip|smallcap|conservative"
+    ),
+    save_report: bool = typer.Option(True, "--save/--no-save", help="결과 CSV/PNG 저장 여부"),
+) -> None:
+    """KOSPI 200 모멘텀 Top-N 월 리밸런싱 백테스트."""
+    from quant.backtest.run_momentum import run
+
+    run(
+        top_n=top_n,
+        lookback_months=lookback,
+        skip_months=skip,
+        min_value=min_value_won,
+        is_ratio=is_ratio,
+        cost_preset=cost_preset,
+        save=save_report,
+    )
 
 
 if __name__ == "__main__":

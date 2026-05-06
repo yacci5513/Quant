@@ -48,14 +48,12 @@ def test_save_then_read_roundtrip(base: Path) -> None:
 
 def test_save_merges_and_dedupes(base: Path) -> None:
     """겹치는 일자가 있으면 새로운 데이터로 덮어쓴다."""
-    first = _sample_df("2025-01-02", 5)
+    first = _sample_df("2025-01-02", 5)  # 1/2, 1/3, 1/6, 1/7, 1/8
     save_ohlcv("005930", first, base)
-    # 마지막 2일과 겹치고 3일 추가
-    second = _sample_df("2025-01-08", 5)
+    second = _sample_df("2025-01-08", 5)  # 1/8, 1/9, 1/10, 1/13, 1/14 — 1/8 겹침
     save_ohlcv("005930", second, base)
     loaded = pd.read_parquet(_ticker_path("005930", base))
-    # 5 + 5 - 2(겹침) = 8
-    assert len(loaded) == 8
+    assert len(loaded) == 9  # 5 + 5 - 1(겹침) = 9
     assert loaded.index.is_monotonic_increasing
     assert not loaded.index.has_duplicates
 

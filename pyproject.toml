@@ -9,6 +9,7 @@ authors = [{ name = "ohsc" }]
 
 dependencies = [
     # ----- 가격/공시 데이터 -----
+    "setuptools>=70,<80",           # pykrx 가 pkg_resources 사용. setuptools 80에서 제거됨
     "pykrx>=1.0.45",                # KRX 공식 데이터 (일봉, 종목)
     "finance-datareader>=0.9.94",   # 보조 데이터 소스
     "pandas-market-calendars>=4.4",  # KRX 거래일 캘린더
@@ -91,7 +92,10 @@ select = [
     "RUF",  # ruff
 ]
 ignore = [
-    "E501",  # line too long (formatter handles)
+    "E501",   # line too long (formatter handles)
+    "RUF001", # ambiguous unicode in identifiers (한국어 주석에서 빈번한 오탐)
+    "RUF002", # ambiguous unicode in docstrings
+    "RUF003", # ambiguous unicode in comments
 ]
 
 [tool.ruff.format]

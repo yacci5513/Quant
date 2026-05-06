@@ -156,8 +156,9 @@ docker-compose.local.yml
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 
-# ===== OMC tooling 로컬 상태 (사용자별, 커밋 X) =====
+# ===== OMC / Claude tooling 로컬 상태 (사용자별, 커밋 X) =====
 .omc/
+.claude/
 
 # ===== 임시/스크래치 =====
 tmp/

@@ -51,14 +51,14 @@ RUN apt-get update \
 # -----------------------------------------------------------------------------
 FROM base AS builder
 
-ARG UV_VERSION
+ARG UV_VERSION=0.4.30
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/venv \
     UV_PYTHON_DOWNLOADS=never
 
 # uv 바이너리 설치
-COPY --from=ghcr.io/astral-sh/uv:${UV_VERSION} /uv /uvx /usr/local/bin/
+COPY --from=ghcr.io/astral-sh/uv:0.4.30 /uv /uvx /usr/local/bin/
 
 # numba/pyarrow/numpy 등 휠 미제공 시 빌드 위한 toolchain
 RUN apt-get update \
@@ -93,14 +93,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # -----------------------------------------------------------------------------
 FROM base AS runtime
 
-ARG UV_VERSION
+ARG UV_VERSION=0.4.30
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/venv \
     UV_PYTHON_DOWNLOADS=never \
     PATH="/opt/venv/bin:$PATH"
 
-COPY --from=ghcr.io/astral-sh/uv:${UV_VERSION} /uv /uvx /usr/local/bin/
+COPY --from=ghcr.io/astral-sh/uv:0.4.30 /uv /uvx /usr/local/bin/
 
 WORKDIR /app
 

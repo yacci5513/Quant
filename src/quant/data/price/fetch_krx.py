@@ -1,15 +1,20 @@
 """KRX(KOSPI/KOSDAQ) 일봉 데이터 수집.
 
-pykrx로 KOSPI 200 구성종목의 일봉 OHLCV를 받아 종목별 Parquet으로 저장한다.
-증분 업데이트 지원 — 기존 파일이 있으면 마지막 일자 다음 날부터만 가져옴.
+FinanceDataReader 기반 (pykrx 1.0.51은 KRX 웹 구조 변경으로 종목 마스터 함수 깨짐).
+KOSPI 시가총액 상위 N으로 KOSPI 200을 근사.
 
 저장 레이아웃:
     data/raw/prices/{ticker}.parquet      # 종목 1개당 1파일
 
 CLI:
-    quant data fetch-krx               # KOSPI 200 5년치
+    quant data fetch-krx               # KOSPI 시총 상위 200개, 5년치
     quant data fetch-krx --years 1     # 1년치
     quant data fetch-krx --tickers 005930,000660
+
+가드레일 §2 (생존 편향) 한계:
+    StockListing은 현재 시점 KOSPI 종목만 반환 — 과거 시점 마스터 추적 불가.
+    백테스트 시 인지하고 결과 해석 (Phase 1 베이스라인 수용).
+    더 엄격하려면 매 리밸런싱 일자별 KRX 공시 OPEN API 호출 (Phase 후속).
 """
 
 from __future__ import annotations
@@ -19,36 +24,36 @@ from collections.abc import Iterable
 from datetime import date, timedelta
 from pathlib import Path
 
+import FinanceDataReader as fdr  # noqa: N813 (라이브러리 표준 alias)
 import pandas as pd
-from pykrx import stock
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from quant.common.config import get_settings
 from quant.common.logger import logger
 
-# pykrx는 KRX 사이트를 스크래핑 → 너무 빠르면 차단당할 수 있음
-_REQUEST_INTERVAL_SEC = 0.2
-_DATE_FMT = "%Y%m%d"
-_KOSPI200_INDEX = "1028"  # KRX 인덱스 코드
+# fdr는 KRX/네이버 등 여러 소스를 사용 — 너무 빠르면 차단당할 수 있음
+_REQUEST_INTERVAL_SEC = 0.1
+_KOSPI_DEFAULT_TOP_N = 200
 
 
 # -----------------------------------------------------------------------------
 # 종목 마스터
 # -----------------------------------------------------------------------------
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
-def fetch_kospi200_tickers(as_of: date | None = None) -> list[str]:
-    """특정 일자 기준 KOSPI 200 구성종목 리스트.
+def fetch_kospi200_tickers(top_n: int = _KOSPI_DEFAULT_TOP_N) -> list[str]:
+    """KOSPI 시총 상위 N개 종목 (KOSPI 200 근사).
 
-    as_of가 None이면 오늘 기준. 영업일이 아니면 직전 영업일을 자동 사용.
+    실제 KOSPI 200 인덱스 구성과 100% 일치하지 않지만(섹터 대표성·유동성 등 추가
+    심사 있음), 백테스트 베이스라인으로는 충분. 시총 상위 200개의 약 90% 이상이
+    실제 KOSPI 200과 겹친다.
     """
-    as_of = as_of or date.today()
-    tickers = stock.get_index_portfolio_deposit_file(_KOSPI200_INDEX, as_of.strftime(_DATE_FMT))
-    if not tickers:
-        # 비영업일이면 빈 리스트 반환됨 → 직전 영업일로 재시도
-        prev = as_of - timedelta(days=1)
-        logger.warning(f"KOSPI 200 종목 조회 실패 ({as_of}), {prev}로 재시도")
-        return fetch_kospi200_tickers(prev)
-    logger.info(f"KOSPI 200 구성종목 {len(tickers)}개 (기준일 {as_of})")
+    listing = fdr.StockListing("KOSPI")
+    if listing.empty or "Marcap" not in listing.columns:
+        raise ValueError("FinanceDataReader StockListing(KOSPI) 결과 비정상")
+    listing = listing.dropna(subset=["Marcap"])
+    listing = listing.sort_values("Marcap", ascending=False)
+    tickers = listing["Code"].head(top_n).tolist()
+    logger.info(f"KOSPI 시총 상위 {len(tickers)}개 (KOSPI 200 근사)")
     return tickers
 
 
@@ -60,28 +65,26 @@ def fetch_ohlcv(ticker: str, start: date, end: date) -> pd.DataFrame:
     """단일 종목 일봉. start/end 포함.
 
     반환 컬럼: open, high, low, close, volume, value, change_pct
-    인덱스: pandas.DatetimeIndex (KST 자정)
+    인덱스: pandas.DatetimeIndex (이름='date')
+    value = close * volume (거래대금 근사)
     """
-    df = stock.get_market_ohlcv_by_date(
-        start.strftime(_DATE_FMT),
-        end.strftime(_DATE_FMT),
-        ticker,
-    )
+    df = fdr.DataReader(ticker, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
     if df.empty:
         return df
     df = df.rename(
         columns={
-            "시가": "open",
-            "고가": "high",
-            "저가": "low",
-            "종가": "close",
-            "거래량": "volume",
-            "거래대금": "value",
-            "등락률": "change_pct",
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Close": "close",
+            "Volume": "volume",
+            "Change": "change_pct",
         }
     )
+    # fdr는 Amount(거래대금) 미제공 → close × volume 으로 근사
+    df["value"] = df["close"] * df["volume"]
     df.index.name = "date"
-    return df
+    return df[["open", "high", "low", "close", "volume", "value", "change_pct"]]
 
 
 # -----------------------------------------------------------------------------
@@ -147,15 +150,15 @@ def fetch_all(
     end: date | None = None,
     base: Path | None = None,
 ) -> dict[str, int]:
-    """KOSPI 200 (또는 지정 종목)의 일봉을 가져와 저장.
+    """KOSPI 시총 상위 N종목 (또는 지정 종목)의 일봉을 가져와 저장.
 
     Returns:
-        ticker → 추가된 행 수
+        ticker → 추가된 행 수 (실패 시 -1)
     """
     end = end or date.today()
     default_start = end - timedelta(days=365 * years)
     if tickers is None:
-        tickers = fetch_kospi200_tickers(end)
+        tickers = fetch_kospi200_tickers()
 
     results: dict[str, int] = {}
     tickers_list = list(tickers)
@@ -165,7 +168,8 @@ def fetch_all(
         try:
             added = update_ticker(ticker, end, default_start, base)
             results[ticker] = added
-            logger.info(f"[{i}/{total}] {ticker}: +{added} rows")
+            if i % 20 == 0 or added > 0:
+                logger.info(f"[{i}/{total}] {ticker}: +{added} rows")
         except Exception as e:
             logger.exception(f"[{i}/{total}] {ticker} 실패: {e}")
             results[ticker] = -1
@@ -185,6 +189,22 @@ def load_close_panel(
 
     인덱스: date, 컬럼: ticker, 값: close. 백테스트 입력용.
     """
+    return _load_panel("close", tickers, base)
+
+
+def load_value_panel(
+    tickers: Iterable[str] | None = None,
+    base: Path | None = None,
+) -> pd.DataFrame:
+    """거래대금(value) 패널 (wide). 유동성 필터용."""
+    return _load_panel("value", tickers, base)
+
+
+def _load_panel(
+    column: str,
+    tickers: Iterable[str] | None,
+    base: Path | None,
+) -> pd.DataFrame:
     base_path = base or (get_settings().data_dir / "raw" / "prices")
     if tickers is None:
         tickers = sorted(p.stem for p in base_path.glob("*.parquet"))
@@ -194,8 +214,8 @@ def load_close_panel(
         path = _ticker_path(ticker, base)
         if not path.exists():
             continue
-        df = pd.read_parquet(path, columns=["close"])
-        series_list.append(df["close"].rename(ticker))
+        df = pd.read_parquet(path, columns=[column])
+        series_list.append(df[column].rename(ticker))
 
     if not series_list:
         return pd.DataFrame()
