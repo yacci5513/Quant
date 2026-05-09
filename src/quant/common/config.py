@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     # ----- DART (전자공시) -----
     dart_api_key: SecretStr = SecretStr("")
 
+    # ----- Telegram 알림 -----
+    telegram_bot_token: SecretStr = SecretStr("")
+    telegram_chat_id: str = ""
+
     # ---- Computed ----
     @property
     def kis_base_url(self) -> str:

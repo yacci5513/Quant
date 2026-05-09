@@ -15,8 +15,10 @@ app = typer.Typer(
 
 data_app = typer.Typer(name="data", help="데이터 수집/관리")
 backtest_app = typer.Typer(name="backtest", help="백테스트 실행/분석")
+notify_app = typer.Typer(name="notify", help="알림 (텔레그램 등)")
 app.add_typer(data_app)
 app.add_typer(backtest_app)
+app.add_typer(notify_app)
 
 
 # ----- 루트 -----
@@ -245,6 +247,9 @@ def signal(
     ),
     ma_window: int = typer.Option(100, "--ma", help="시장 레짐 MA (100=챔피언, 200=보수)"),
     rebalance_freq: str = typer.Option("BMS", "--freq", help="리밸런싱: BMS|2W-FRI|BQS"),
+    telegram: bool = typer.Option(
+        False, "--telegram", "-t", help="결과를 텔레그램으로도 발송 (--daily와 함께 사용)"
+    ),
 ) -> None:
     """현재 시점 시그널 — 오늘 매수해야 할 종목 또는 매일 알림 (--daily)."""
     from quant.strategies.momentum_topn import MomentumTopNConfig
@@ -260,7 +265,16 @@ def signal(
             replace_threshold=0.0,
         )
         ds = compute_daily_signal(seed_won=seed, config=cfg, ma_window=ma_window)
-        typer.echo("\n" + render_alert(ds))
+        text = render_alert(ds)
+        typer.echo("\n" + text)
+        if telegram:
+            from quant.notify.telegram import send_telegram
+
+            sent = send_telegram(text)
+            if sent:
+                typer.echo("\n📲 텔레그램 발송 완료")
+            else:
+                typer.echo("\n⚠️ 텔레그램 미설정 — .env에 TELEGRAM_BOT_TOKEN/CHAT_ID 추가")
         return
 
     from quant.signal import latest_momentum_signal, render_signal_table
@@ -434,6 +448,19 @@ def backtest_report_kr(
     out_dir = get_settings().data_dir / "backtest" / "report_kr"
     out = render_html(sections, out_dir / "momentum_kr.html")
     typer.echo(f"\n한국어 리포트: {out}")
+
+
+@notify_app.command("ping")
+def notify_ping() -> None:
+    """텔레그램 봇 연결 테스트 — 'Quant 봇 연결 테스트' 메시지 발송."""
+    from quant.notify.telegram import send_test_ping
+
+    try:
+        send_test_ping()
+        typer.echo("✅ 발송 성공 — 텔레그램 확인하세요")
+    except Exception as e:
+        typer.echo(f"❌ 발송 실패: {e}")
+        raise typer.Exit(1) from e
 
 
 if __name__ == "__main__":

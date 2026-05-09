@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # =============================================================================
-# Quant — Multi-stage Dockerfile (Apple Silicon arm64 target)
+# Quant — Multi-stage Dockerfile (multi-arch: Mac arm64 + Lightsail x86_64)
 #
 # Stages:
 #   - base       : 공통 베이스 (Python + tzdata + KST)
@@ -23,7 +23,7 @@ ARG UV_VERSION=0.4.30
 # -----------------------------------------------------------------------------
 # base — 공통 베이스: KST 타임존 + locale 안정화
 # -----------------------------------------------------------------------------
-FROM --platform=linux/arm64 python:${PYTHON_VERSION}-slim-bookworm AS base
+FROM python:${PYTHON_VERSION}-slim-bookworm AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

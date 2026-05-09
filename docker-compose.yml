@@ -21,8 +21,6 @@ services:
       context: .
       dockerfile: Dockerfile
       target: dev
-      platforms:
-        - linux/arm64
     image: quant:dev
     container_name: quant-app
     env_file:
@@ -60,8 +58,6 @@ services:
       context: .
       dockerfile: Dockerfile
       target: runtime
-      platforms:
-        - linux/arm64
     image: quant:latest
     container_name: quant-app-prod
     env_file:
