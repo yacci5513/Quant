@@ -384,15 +384,30 @@ def render_alert(signal: DailySignal) -> str:
             if port_1d is not None:
                 lines.append(f"💼 포트폴리오: 어제 {_fmt_pct(port_1d)} / 5d {_fmt_pct(port_5d)}")
             lines.append("")
-            lines.append(f"📦 보유 {len(s.holdings)}종목 (1d / 5d):")
+            lines.append(f"📦 보유 {len(s.holdings)}종목:")
+            insufficient: list[HoldingRow] = []
             for h in s.holdings:
-                shares = f"{h.target_shares}주" if h.target_shares else "─"
-                ret_1d = _fmt_pct(h.ret_1d)
                 ret_5d = _fmt_pct(h.ret_5d)
-                lines.append(
-                    f"  {_ret_icon(h.ret_1d)} {h.ticker} {h.name:<10} "
-                    f"{shares:<6} {ret_1d:>7} / {ret_5d:>7}"
-                )
+                ret_1d = _fmt_pct(h.ret_1d)
+                if h.target_shares and h.target_shares > 0 and h.last_close:
+                    val_man = (h.target_shares * h.last_close) / 10000
+                    lines.append(
+                        f"{_ret_icon(h.ret_1d)} {h.name} "
+                        f"{h.target_shares}주 {val_man:,.0f}만 "
+                        f"({ret_1d}/5d {ret_5d})"
+                    )
+                else:
+                    insufficient.append(h)
+
+            if insufficient:
+                lines.append("")
+                lines.append(f"⚠️ 시드 부족 {len(insufficient)}종목 (1주 가격 > 종목당 100만):")
+                for h in insufficient:
+                    price_man = (h.last_close or 0) / 10000
+                    lines.append(
+                        f"   {h.name} 1주 {price_man:,.0f}만 "
+                        f"({_fmt_pct(h.ret_1d)}/5d {_fmt_pct(h.ret_5d)})"
+                    )
 
             # 가장 좋은/나쁜
             valid = [h for h in s.holdings if h.ret_5d is not None]
@@ -400,8 +415,8 @@ def render_alert(signal: DailySignal) -> str:
                 best = max(valid, key=lambda x: x.ret_5d)
                 worst = min(valid, key=lambda x: x.ret_5d)
                 lines.append("")
-                lines.append(f"🏆 5d 최고: {best.name} ({_fmt_pct(best.ret_5d)})")
-                lines.append(f"⚠️ 5d 최저: {worst.name} ({_fmt_pct(worst.ret_5d)})")
+                lines.append(f"🏆 5d 최고: {best.name} {_fmt_pct(best.ret_5d)}")
+                lines.append(f"⚠️ 5d 최저: {worst.name} {_fmt_pct(worst.ret_5d)}")
 
         lines.append("")
         lines.append("🎯 행동: 보유 유지")
