@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 
 from quant.backtest.risk import (
@@ -78,12 +79,24 @@ def execute_rebalance(
     notes: list[str] = list(signal.notes)
     notes.append(f"모드: {s.kis_mode.value} / 시드: {seed:,}원 / dry_run: {dry_run}")
 
+    def _dry_order(ticker: str, qty: int, side: str, est_price: float | None) -> OrderResult:
+        """dry-run 가짜 OrderResult — render에서 그대로 종목명·가격 표시 가능."""
+        return OrderResult(
+            order_no="DRY",
+            ticker=ticker,
+            side=side,
+            quantity=qty,
+            requested_price=est_price,
+            success=True,
+            raw={},
+        )
+
     # 2. Kill switch / 노출 한도 사전 점검
     if signal.alert_type is AlertType.LIQUIDATE:
         notes.append("청산 신호 — 모든 보유 시장가 매도")
         for h in holdings:
             if dry_run:
-                skipped.append(f"DRY: 매도 {h.ticker} {h.quantity}주")
+                sells_orders.append(_dry_order(h.ticker, h.quantity, "sell", h.current_price))
                 continue
             try:
                 r = order_cash(ticker=h.ticker, quantity=h.quantity, side="sell", price=None)
@@ -101,7 +114,7 @@ def execute_rebalance(
         for ticker in actual_set - target_set:
             h = held_map[ticker]
             if dry_run:
-                skipped.append(f"DRY: 매도 {ticker} {h.quantity}주")
+                sells_orders.append(_dry_order(ticker, h.quantity, "sell", h.current_price))
                 continue
             try:
                 r = order_cash(ticker=ticker, quantity=h.quantity, side="sell", price=None)
@@ -117,7 +130,7 @@ def execute_rebalance(
             if need <= 0:
                 continue
             if dry_run:
-                skipped.append(f"DRY: 매수 {ticker} {need}주")
+                buys_orders.append(_dry_order(ticker, need, "buy", target.last_close))
                 continue
             try:
                 r = order_cash(ticker=ticker, quantity=need, side="buy", price=None)
@@ -139,28 +152,68 @@ def execute_rebalance(
     return ExecutionResult(sells=sells_orders, buys=buys_orders, skipped=skipped, notes=notes)
 
 
+def _name_map() -> dict[str, str]:
+    """종목번호 → 한글명 매핑 (KOSPI + KOSDAQ)."""
+    try:
+        import FinanceDataReader as fdr  # noqa: N813
+
+        m: dict[str, str] = {}
+        for market in ("KOSPI", "KOSDAQ"):
+            listing = fdr.StockListing(market)
+            m.update(dict(zip(listing["Code"], listing["Name"], strict=False)))
+        return m
+    except Exception as e:
+        logger.warning(f"종목명 조회 실패: {e}")
+        return {}
+
+
 def render_execution_result(res: ExecutionResult, *, signal_type: AlertType, dry_run: bool) -> str:
-    """실행 결과 → 텔레그램 메시지."""
+    """실행 결과 → 텔레그램 메시지 (종목명 + 가격 포함)."""
     icon = "🧪 DRY-RUN" if dry_run else "🤖 실거래 체결"
     lines = [f"{icon} | {signal_type.value}"]
+    names = _name_map()
+
+    def _fmt_order(o: OrderResult) -> str:
+        nm = names.get(o.ticker, "?")
+        # raw 응답에서 체결가 시도 (실거래 시), 없으면 requested_price 또는 시장가
+        price_part = ""
+        if o.requested_price:
+            price_part = f" @{int(o.requested_price):,}원"
+        elif isinstance(o.raw, dict):
+            output = o.raw.get("output", {}) if isinstance(o.raw.get("output"), dict) else {}
+            price = output.get("AVG_PRVS") or output.get("ord_unpr")
+            if price:
+                with contextlib.suppress(ValueError, TypeError):
+                    price_part = f" @{int(float(price)):,}원"
+            else:
+                price_part = " (시장가)"
+        else:
+            price_part = " (시장가)"
+        order_part = f" #{o.order_no}" if o.order_no else ""
+        return f"  · {o.ticker} {nm} {o.quantity}주{price_part}{order_part}"
 
     if res.sells:
         lines.append("")
         lines.append(f"🔴 매도 {len(res.sells)}건:")
         for o in res.sells:
-            lines.append(f"  · {o.ticker} {o.quantity}주 (주문번호 {o.order_no})")
+            lines.append(_fmt_order(o))
 
     if res.buys:
         lines.append("")
         lines.append(f"🟢 매수 {len(res.buys)}건:")
         for o in res.buys:
-            lines.append(f"  · {o.ticker} {o.quantity}주 (주문번호 {o.order_no})")
+            lines.append(_fmt_order(o))
 
     if res.skipped:
         lines.append("")
         lines.append(f"⚠️ Skip/실패 {len(res.skipped)}건:")
-        for s in res.skipped[:10]:  # 최대 10건만
-            lines.append(f"  · {s}")
+        for s in res.skipped[:10]:
+            enriched = s
+            for code, nm in names.items():
+                if code in s:
+                    enriched = s.replace(code, f"{code} {nm}", 1)
+                    break
+            lines.append(f"  · {enriched}")
         if len(res.skipped) > 10:
             lines.append(f"  ... +{len(res.skipped) - 10}건 더")
 
