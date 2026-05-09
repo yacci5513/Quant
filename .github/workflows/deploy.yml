@@ -10,9 +10,10 @@ name: Deploy to Server
 #   SSH_PORT            (선택) 기본 22
 #   PROJECT_DIR         (선택) 서버에서 프로젝트 경로 (기본 ~/quant)
 #
-# 트리거:
-#   - main 브랜치 push 시 자동
-#   - 또는 Actions 탭에서 수동 (workflow_dispatch)
+# 흐름:
+#   1. main push 시 트리거
+#   2. SSH로 서버 접속 → git pull → docker build → 컨테이너 안에서 pytest
+#      (runner에선 의존성 설치 안 함 — 서버 docker가 모든 의존성 보유)
 
 on:
   push:
@@ -32,24 +33,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: 'pip'
-      - name: Install dependencies
-        run: |
-          pip install uv
-          uv sync --no-dev || pip install -e .
-          pip install pytest
-      - name: Run tests
-        run: pytest -q
-
   deploy:
-    needs: test
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
@@ -63,11 +47,21 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -p "${{ secrets.SSH_PORT || 22 }}" -H "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Pull latest + restart
+      - name: Pull + Build + Test on server
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT || 22 }}
+          PROJECT_DIR: ${{ secrets.PROJECT_DIR || '~/quant' }}
         run: |
-          ssh -p "${{ secrets.SSH_PORT || 22 }}" "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" \
-            "cd ${{ secrets.PROJECT_DIR || '~/quant' }} && \
-             git pull --ff-only && \
-             docker compose build app && \
-             docker compose run --rm app pytest -q && \
-             echo 'Deploy OK: '$(git rev-parse --short HEAD)"
+          ssh -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" bash -lc "'
+            set -e
+            cd $PROJECT_DIR
+            echo \"=== git pull ===\"
+            git pull --ff-only
+            echo \"=== docker build ===\"
+            docker compose build app
+            echo \"=== pytest in container ===\"
+            docker compose run --rm app pytest -q
+            echo \"Deploy OK: \$(git rev-parse --short HEAD)\"
+          '"
