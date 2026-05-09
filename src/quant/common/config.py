@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     seed_won: int = 0  # 0이면 시드 미설정. 매매 자동 차단
     max_position_per_stock_won: int = 0  # 단일 종목 매수 한도 (0=시드/10)
 
+    # ----- 전략 옵션 -----
+    strategy_multi_regime: bool = False  # True=B 정책 (약세에 저변동), False=단일 모멘텀
+    strategy_freq: str = "BMS"  # 리밸런싱 빈도: BMS(월) | 2W-FRI(격주) | BQS(분기)
+
     # ----- DART (전자공시) -----
     dart_api_key: SecretStr = SecretStr("")
 

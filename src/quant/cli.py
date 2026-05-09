@@ -260,19 +260,28 @@ def signal(
         from quant.common.config import get_settings
         from quant.daily_signal import compute_daily_signal, render_alert
 
+        s = get_settings()
         # seed CLI 옵션 미입력 시 .env의 SEED_WON 사용 (0이면 None)
         if seed is None:
-            env_seed = get_settings().seed_won
+            env_seed = s.seed_won
             seed = float(env_seed) if env_seed > 0 else None
+
+        # CLI freq 미지정 시 .env STRATEGY_FREQ 사용
+        effective_freq = rebalance_freq if rebalance_freq != "BMS" else s.strategy_freq
 
         cfg = MomentumTopNConfig(
             top_n=top_n,
             lookback_months=lookback,
             skip_months=skip,
-            rebalance_freq=rebalance_freq,
+            rebalance_freq=effective_freq,
             replace_threshold=0.0,
         )
-        ds = compute_daily_signal(seed_won=seed, config=cfg, ma_window=ma_window)
+        ds = compute_daily_signal(
+            seed_won=seed,
+            config=cfg,
+            ma_window=ma_window,
+            multi_regime=s.strategy_multi_regime,
+        )
         text = render_alert(ds)
         typer.echo("\n" + text)
         if telegram:

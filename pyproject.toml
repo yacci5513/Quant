@@ -93,6 +93,7 @@ select = [
 ]
 ignore = [
     "E501",   # line too long (formatter handles)
+    "UP042",  # str+Enum → StrEnum (호환성 위해 (str, Enum) 패턴 유지)
     "RUF001", # ambiguous unicode in identifiers (한국어 주석에서 빈번한 오탐)
     "RUF002", # ambiguous unicode in docstrings
     "RUF003", # ambiguous unicode in comments

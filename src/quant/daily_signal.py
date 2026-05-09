@@ -1,14 +1,20 @@
 """매일 아침 알림 통합 — 모의투자/실거래 운용 핵심.
 
+챔피언 (다중 레짐 #6):
+  강세장:    모멘텀 Top-10 (12-1 모멘텀)
+  강세 변동성: 모멘텀 60% + 저변동성 40%
+  약세장:    저변동성 Top-10 (방어주 보유)
+  회복기:    모멘텀 50% (점진적 진입)
+
 5가지 시나리오 자동 판별:
 1. 정상     : 보유 유지 (90% 이상 해당)
 2. 리밸런싱 : 월간 매매일 도래 — 매도/매수 종목 명시
-3. 청산     : 시장 MA 깨짐 — 즉시 전량 매도
+3. 청산     : 시장 MA 깨짐 — 모멘텀 → 저변동성 갈아타기 (B 정책)
 4. 회복     : 시장 MA 회복 — 다음 리밸런싱부터 매수 재개
 5. Kill     : 일일 -3% 또는 누적 -20% — 비상 청산 (가드레일 §10)
 
 사용:
-    quant signal --daily            # 챔피언 (월간 모멘텀+MA100) 기준 알림
+    quant signal --daily            # 챔피언 기준 알림
     quant signal --daily --seed 10000000  # 시드 입력 시 잔고/주식수 추정
 """
 
@@ -21,9 +27,20 @@ from enum import Enum
 import pandas as pd
 
 from quant.backtest.regime import RegimeMode, filter_weights, regime_state
+from quant.backtest.regime_strategy import RegimePolicy, combine_by_regime
 from quant.common.logger import logger
 from quant.data.price.fetch_krx import load_close_panel, load_value_panel
+from quant.strategies.low_volatility import LowVolatilityConfig
+from quant.strategies.low_volatility import generate_weights as lv_w
 from quant.strategies.momentum_topn import MomentumTopNConfig, generate_weights
+
+# 챔피언 정책 #6 — 강세에 모멘텀, 약세엔 저변동성, 변동성 큰 강세엔 60/40
+CHAMPION_POLICY_B = RegimePolicy(
+    bull_strong={"momentum": 1.0},
+    bull_choppy={"momentum": 0.6, "low_vol": 0.4},
+    bear={"low_vol": 1.0},  # 약세장에 저변동성 100% 보유 (B 정책)
+    recovery={"momentum": 0.5},  # 회복기 50% 진입 + 50% 현금
+)
 
 
 class AlertType(str, Enum):
@@ -124,14 +141,16 @@ def compute_daily_signal(
     values: pd.DataFrame | None = None,
     config: MomentumTopNConfig | None = None,
     ma_window: int = 100,
+    multi_regime: bool = False,
 ) -> DailySignal:
-    """챔피언(월간 모멘텀+MA100) 기준 오늘 알림 생성.
+    """챔피언 기준 오늘 알림 생성.
 
     args:
         seed_won: 시드(원). 입력 시 종목별 매수 금액·주식 수 계산.
         prices/values: 미리 로드된 패널 (테스트 용). None이면 디스크에서 로드.
-        config: MomentumTopNConfig. None이면 챔피언 기본값 (월간/12m/Top10).
+        config: MomentumTopNConfig. None이면 챔피언 기본값.
         ma_window: 시장 레짐 MA 윈도우 (100=챔피언, 200=보수적).
+        multi_regime: True면 정책 #6 (BEAR=lv 100%) 사용. False면 단일 모멘텀+MA 청산.
     """
     cfg = config or MomentumTopNConfig(
         top_n=10, lookback_months=12, rebalance_freq="BMS", replace_threshold=0.0
@@ -145,7 +164,6 @@ def compute_daily_signal(
 
     # 시장 상태
     market = regime_state(prices, ma_window=ma_window)
-    # 시장 proxy 1d/5d 변화 추가
     proxy = prices.mean(axis=1)
     if len(proxy) >= 2:
         market["change_1d"] = float(proxy.iloc[-1] / proxy.iloc[-2] - 1.0)
@@ -154,11 +172,33 @@ def compute_daily_signal(
     today = pd.Timestamp(market["as_of"]).date()
     name_map = _ticker_name_map()
 
-    # 챔피언 가중치 패널 + 시장 필터
-    base_weights = generate_weights(prices, values=values, config=cfg)
-    weights, exposure = filter_weights(
-        prices, base_weights, mode=RegimeMode.BINARY, ma_window=ma_window
-    )
+    # 챔피언 가중치 패널
+    if multi_regime:
+        # B 정책 — 약세장에 저변동성 보유
+        mom_panel = generate_weights(prices, values=values, config=cfg)
+        lv_panel = lv_w(
+            prices,
+            values=values,
+            config=LowVolatilityConfig(
+                top_n=10,
+                vol_window_days=60,
+                rebalance_freq=cfg.rebalance_freq,
+            ),
+        )
+        weights = combine_by_regime(
+            prices,
+            {"momentum": mom_panel, "low_vol": lv_panel},
+            policy=CHAMPION_POLICY_B,
+        )
+        # exposure은 단순 보유 여부 (binary): row sum > 0이면 1
+        exposure = (weights.sum(axis=1) > 1e-6).astype(float)
+        base_weights = weights  # 청산 메시지 시 보유 종목 = 현재
+    else:
+        # 단일 챔피언 (이전 default)
+        base_weights = generate_weights(prices, values=values, config=cfg)
+        weights, exposure = filter_weights(
+            prices, base_weights, mode=RegimeMode.BINARY, ma_window=ma_window
+        )
 
     # 마지막 리밸런싱 일자 (가중치가 변한 마지막 날)
     weight_change = weights.diff().abs().sum(axis=1)
