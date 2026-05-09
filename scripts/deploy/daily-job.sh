@@ -9,7 +9,7 @@
 #   - 평일 18:30 권장 (장 마감 15:30 + 데이터 반영 지연)
 #
 # 로그:
-#   - /home/ubuntu/quant/logs/cron-YYYY-MM-DD.log
+#   - <project_root>/logs/cron/YYYY-MM-DD.log
 set -euo pipefail
 
 # 절대 경로로 이동 (cron은 PATH가 빈약함)

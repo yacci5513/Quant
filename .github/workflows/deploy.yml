@@ -1,0 +1,73 @@
+name: Deploy to Server
+
+# 서버 정보(host, user, ssh key)는 모두 GitHub Secrets에 저장되며
+# 이 파일·로그·아티팩트 어디에도 평문 노출되지 않는다.
+#
+# 필요한 Secrets:
+#   SSH_HOST            서버 호스트 (또는 IP)
+#   SSH_USER            ssh 사용자명
+#   SSH_PRIVATE_KEY     private key (PEM 형식)
+#   SSH_PORT            (선택) 기본 22
+#   PROJECT_DIR         (선택) 서버에서 프로젝트 경로 (기본 ~/quant)
+#
+# 트리거:
+#   - main 브랜치 push 시 자동
+#   - 또는 Actions 탭에서 수동 (workflow_dispatch)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'scripts/deploy/**'
+      - 'pyproject.toml'
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          pip install uv
+          uv sync --no-dev || pip install -e .
+          pip install pytest
+      - name: Run tests
+        run: pytest -q
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add server to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "${{ secrets.SSH_PORT || 22 }}" -H "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Pull latest + restart
+        run: |
+          ssh -p "${{ secrets.SSH_PORT || 22 }}" "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" \
+            "cd ${{ secrets.PROJECT_DIR || '~/quant' }} && \
+             git pull --ff-only && \
+             docker compose build app && \
+             docker compose run --rm app pytest -q && \
+             echo 'Deploy OK: '$(git rev-parse --short HEAD)"

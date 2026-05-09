@@ -9,6 +9,13 @@
 .env
 .env.*
 !.env.example
+
+# ===== 개인 운영 노트 — 공개 리포에 포함 안 함 =====
+HANDOFF.md
+CLAUDE.md
+DEPLOY.md
+RESUME_INSTRUCTIONS.md
+.claude/
 *.pem
 *.key
 *.crt

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Quant 서버 초기 셋업 (AWS Lightsail / Ubuntu).
+# Quant 서버 초기 셋업 (한국 region Linux 서버, Docker 사전 설치 가정).
 #
-# 실행:
-#   ssh ***SERVER***
-#   cd ~ && git clone git@github.com:***USER***/Quant.git quant
+# 실행 (서버에서):
+#   git clone <repo-url> quant
 #   cd quant
 #   bash scripts/deploy/setup-server.sh
 #
 # 사전:
-#   - Docker + Compose 설치됨 (이미 ***SERVER***에 있음)
-#   - .env는 별도 업로드 (scp .env ***SERVER***:~/quant/.env)
+#   - Docker + Docker Compose 설치됨
+#   - .env는 별도 안전한 채널로 업로드 (scp / GitHub Secrets / 사설 vault)
+#   - 코드/문서에 서버 정보, 인스턴스 alias, IP 절대 하드코딩 금지
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -17,8 +17,7 @@ cd "$(dirname "$0")/../.."
 echo "=== 1. .env 존재 확인 ==="
 if [[ ! -f .env ]]; then
     echo "❌ .env 파일이 없습니다."
-    echo "   로컬에서 다음 명령으로 업로드:"
-    echo "   scp .env ***SERVER***:$(pwd)/.env"
+    echo "   별도 안전한 채널로 .env 업로드 후 재실행하세요."
     exit 1
 fi
 echo "✅ .env 존재 ($(wc -l < .env) 줄)"
@@ -41,8 +40,8 @@ docker compose run --rm app quant hello
 docker compose run --rm app pytest -q
 
 echo
-echo "=== 6. 텔레그램 ping ==="
-docker compose run --rm app quant notify ping
+echo "=== 6. 텔레그램 ping (TELEGRAM_* 설정된 경우) ==="
+docker compose run --rm app quant notify ping || echo "(텔레그램 미설정 — skip)"
 
 echo
 echo "✅ 셋업 완료. 다음:"
