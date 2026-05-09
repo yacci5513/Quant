@@ -47,7 +47,7 @@ fi
 {
     echo
     echo "[2/2] Daily signal + telegram..."
-    docker compose run --rm app quant signal --daily --seed 10000000 --telegram 2>&1
+    docker compose run --rm app quant signal --daily --telegram 2>&1
 } >> "$LOG_FILE" 2>&1
 
 echo "Daily job done: $(date -Iseconds)" >> "$LOG_FILE"

@@ -64,6 +64,10 @@ class Settings(BaseSettings):
     kis_base_url_paper: str = "https://openapivts.koreainvestment.com:29443"
     kis_base_url_live: str = "https://openapi.koreainvestment.com:9443"
 
+    # ----- 시드 (운용 자금) -----
+    seed_won: int = 0  # 0이면 시드 미설정. 매매 자동 차단
+    max_position_per_stock_won: int = 0  # 단일 종목 매수 한도 (0=시드/10)
+
     # ----- DART (전자공시) -----
     dart_api_key: SecretStr = SecretStr("")
 

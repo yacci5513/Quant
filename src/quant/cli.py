@@ -16,9 +16,11 @@ app = typer.Typer(
 data_app = typer.Typer(name="data", help="데이터 수집/관리")
 backtest_app = typer.Typer(name="backtest", help="백테스트 실행/분석")
 notify_app = typer.Typer(name="notify", help="알림 (텔레그램 등)")
+live_app = typer.Typer(name="live", help="KIS 실거래/모의투자 (잔고/주문/리밸런싱)")
 app.add_typer(data_app)
 app.add_typer(backtest_app)
 app.add_typer(notify_app)
+app.add_typer(live_app)
 
 
 # ----- 루트 -----
@@ -255,7 +257,13 @@ def signal(
     from quant.strategies.momentum_topn import MomentumTopNConfig
 
     if daily:
+        from quant.common.config import get_settings
         from quant.daily_signal import compute_daily_signal, render_alert
+
+        # seed CLI 옵션 미입력 시 .env의 SEED_WON 사용 (0이면 None)
+        if seed is None:
+            env_seed = get_settings().seed_won
+            seed = float(env_seed) if env_seed > 0 else None
 
         cfg = MomentumTopNConfig(
             top_n=top_n,
@@ -448,6 +456,46 @@ def backtest_report_kr(
     out_dir = get_settings().data_dir / "backtest" / "report_kr"
     out = render_html(sections, out_dir / "momentum_kr.html")
     typer.echo(f"\n한국어 리포트: {out}")
+
+
+@live_app.command("balance")
+def live_balance() -> None:
+    """현재 KIS 보유 종목 + 평가손익 출력."""
+    from quant.live.client import get_balance
+
+    holdings = get_balance()
+    if not holdings:
+        typer.echo("보유 종목 없음")
+        return
+    typer.echo(f"\n💼 보유 {len(holdings)}종목:\n")
+    total = 0.0
+    profit_total = 0.0
+    for h in holdings:
+        typer.echo(
+            f"  {h.ticker} {h.name:<14} {h.quantity:>5}주 "
+            f"@{h.avg_price:>9,.0f} → {h.current_price:>9,.0f}원 "
+            f"({h.profit_pct:+.2f}%)"
+        )
+        total += h.eval_amount
+        profit_total += h.profit
+    typer.echo(f"\n  💰 평가합계: {total:,.0f}원 (손익 {profit_total:+,.0f}원)")
+
+
+@live_app.command("rebalance")
+def live_rebalance(
+    dry_run: bool = typer.Option(
+        True, "--dry-run/--execute", help="--dry-run (기본): 시뮬, --execute: 실거래 주문"
+    ),
+    seed: int | None = typer.Option(
+        None, "--seed", help="시드 강제 (미지정 시 .env SEED_WON 사용)"
+    ),
+) -> None:
+    """챔피언 시그널 → KIS 자동 리밸런싱 (시뮬 기본, --execute로 실거래)."""
+    from quant.daily_signal import AlertType  # noqa
+    from quant.live.execute import execute_rebalance
+
+    res = execute_rebalance(dry_run=dry_run, seed_override=seed, notify=True)
+    typer.echo(f"매도: {len(res.sells)} / 매수: {len(res.buys)} / Skip: {len(res.skipped)}")
 
 
 @notify_app.command("ping")
