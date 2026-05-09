@@ -95,7 +95,7 @@ src/quant/
 
 - `.env`는 절대 커밋 금지 (`.gitignore` + pre-commit hook 이중 차단)
 - 시크릿 노출 시 30분 내 KIS 콘솔에서 키 무효화 + 재발급
-- 상세: [`SECURITY.md`](./SECURITY.md)
+- 서버 정보·인스턴스 ID·SSH 키는 GitHub Secrets / 환경변수에서만 참조
 
 ## 라이선스
 
