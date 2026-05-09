@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Quant cron 등록 — 평일 18:30 KST 매일 알림.
+# Quant cron 등록 — 평일 08:30 KST 매일 알림 (장 시작 30분 전).
 #
 # 실행:
 #   bash scripts/deploy/install-cron.sh
@@ -17,9 +17,9 @@ if [[ ! -x "$DAILY_JOB" ]]; then
     chmod +x "$DAILY_JOB"
 fi
 
-# cron 라인 — 평일 18:30 KST (서버 timezone Asia/Seoul 기준)
-CRON_LINE="30 18 * * 1-5 ${DAILY_JOB}"
-COMMENT="# quant: daily signal + telegram (평일 18:30 KST)"
+# cron 라인 — 평일 08:30 KST (장 시작 09:00 30분 전, 매수 결정 시간)
+CRON_LINE="30 8 * * 1-5 ${DAILY_JOB}"
+COMMENT="# quant: daily signal + telegram (평일 08:30 KST, 장 시작 30분 전)"
 
 # 기존 cron에 quant 라인 있으면 제거 후 재등록
 TMP_CRON=$(mktemp)

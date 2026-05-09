@@ -118,8 +118,7 @@ def test_render_alert_liquidate_shows_sells() -> None:
         notes=["MA100 하향 돌파"],
     )
     text = render_alert(signal)
-    assert "즉시 행동" in text
-    assert "전량 청산" in text
+    assert "즉시 전량 청산" in text
     assert "삼성전자" in text
 
 

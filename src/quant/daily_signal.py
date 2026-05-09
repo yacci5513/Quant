@@ -42,6 +42,9 @@ class HoldingRow:
     target_value_won: float | None = None
     target_shares: int | None = None
     last_close: float | None = None
+    ret_1d: float | None = None  # 어제 종가 대비 오늘 수익률 (양/음)
+    ret_5d: float | None = None  # 5일 전 대비
+    ret_1m: float | None = None  # 1개월 전 대비
 
 
 @dataclass
@@ -72,17 +75,32 @@ def _ticker_name_map() -> dict[str, str]:
         return {}
 
 
+def _recent_return(prices: pd.DataFrame, ticker: str, days: int) -> float | None:
+    """N영업일 전 대비 수익률. 데이터 부족·NaN 시 None."""
+    if ticker not in prices.columns or len(prices) <= days:
+        return None
+    cur = prices[ticker].iloc[-1]
+    past = prices[ticker].iloc[-1 - days]
+    if pd.isna(cur) or pd.isna(past) or past <= 0:
+        return None
+    return float(cur / past - 1.0)
+
+
 def _to_holding_rows(
     weights: pd.Series,
     last_close: pd.Series,
     name_map: dict[str, str],
     seed_won: float | None,
+    prices: pd.DataFrame | None = None,
 ) -> list[HoldingRow]:
     rows: list[HoldingRow] = []
     for ticker, w in weights[weights > 0].sort_values(ascending=False).items():
         close = float(last_close.get(ticker, float("nan")))
         target_value = seed_won * w if seed_won else None
         target_shares = int(target_value // close) if target_value and close > 0 else None
+        ret_1d = _recent_return(prices, ticker, 1) if prices is not None else None
+        ret_5d = _recent_return(prices, ticker, 5) if prices is not None else None
+        ret_1m = _recent_return(prices, ticker, 21) if prices is not None else None
         rows.append(
             HoldingRow(
                 ticker=ticker,
@@ -91,6 +109,9 @@ def _to_holding_rows(
                 last_close=close,
                 target_value_won=target_value,
                 target_shares=target_shares,
+                ret_1d=ret_1d,
+                ret_5d=ret_5d,
+                ret_1m=ret_1m,
             )
         )
     return rows
@@ -124,6 +145,12 @@ def compute_daily_signal(
 
     # 시장 상태
     market = regime_state(prices, ma_window=ma_window)
+    # 시장 proxy 1d/5d 변화 추가
+    proxy = prices.mean(axis=1)
+    if len(proxy) >= 2:
+        market["change_1d"] = float(proxy.iloc[-1] / proxy.iloc[-2] - 1.0)
+    if len(proxy) >= 6:
+        market["change_5d"] = float(proxy.iloc[-1] / proxy.iloc[-6] - 1.0)
     today = pd.Timestamp(market["as_of"]).date()
     name_map = _ticker_name_map()
 
@@ -155,7 +182,7 @@ def compute_daily_signal(
     if yesterday_above and not today_above:
         # 시장 MA 깨짐 → 즉시 청산
         prev_holdings = base_weights.iloc[-1]  # 필터 전 = 어제까지 보유
-        holdings = _to_holding_rows(prev_holdings, last_close, name_map, seed_won)
+        holdings = _to_holding_rows(prev_holdings, last_close, name_map, seed_won, prices)
         notes.append(f"시장 {market['distance_pct']:+.1f}% — MA{ma_window} 하향 돌파")
         return DailySignal(
             as_of=today,
@@ -216,14 +243,16 @@ def compute_daily_signal(
             last_close,
             name_map,
             seed_won,
+            prices,
         )
         new_buys = _to_holding_rows(
             cur_holdings[list(buy_tickers)] if buy_tickers else pd.Series(dtype=float),
             last_close,
             name_map,
             seed_won,
+            prices,
         )
-        holdings = _to_holding_rows(cur_holdings, last_close, name_map, seed_won)
+        holdings = _to_holding_rows(cur_holdings, last_close, name_map, seed_won, prices)
         return DailySignal(
             as_of=today,
             alert_type=AlertType.REBALANCE,
@@ -237,7 +266,7 @@ def compute_daily_signal(
 
     # 정상 — 보유 유지
     cur_holdings = weights.loc[last_rb_date]
-    holdings = _to_holding_rows(cur_holdings, last_close, name_map, seed_won)
+    holdings = _to_holding_rows(cur_holdings, last_close, name_map, seed_won, prices)
     return DailySignal(
         as_of=today,
         alert_type=AlertType.NORMAL,
@@ -250,74 +279,136 @@ def compute_daily_signal(
     )
 
 
+def _fmt_pct(v: float | None, *, plus: bool = True) -> str:
+    """수익률 포맷 — '-' 처리 + 색 이모지."""
+    if v is None:
+        return "─"
+    sign = "+" if (plus and v >= 0) else ""
+    return f"{sign}{v * 100:.1f}%"
+
+
+def _ret_icon(v: float | None) -> str:
+    if v is None:
+        return "  "
+    if v > 0.005:
+        return "🔵"
+    if v < -0.005:
+        return "🔴"
+    return "⚪"
+
+
 def render_alert(signal: DailySignal) -> str:
-    """DailySignal → 사람이 읽을 수 있는 알림 텍스트."""
+    """텔레그램용 compact 알림.
+
+    포맷 원칙:
+    - 첫 줄에 핵심 결론 (행동 / 손익)
+    - 시장 의미를 1줄로 요약 (지수 위치 + 어제 변화)
+    - 보유 종목별 비중 + 1d/5d 수익률
+    - 가장 좋은/나쁜 종목 강조
+    """
     s = signal
-    lines = [f"📅 {s.as_of} 매일 알림"]
-
-    # 시장 상태
     m = s.market_state
-    icon = "✅" if m["in_uptrend"] else "🔴"
-    lines.append("")
-    lines.append("📊 시장 상태")
-    lines.append(f"  KOSPI EW: {m['market_value']:,.0f}")
-    lines.append(f"  MA:       {m['ma_value']:,.0f} ({m['distance_pct']:+.1f}%)")
-    lines.append(f"  → {icon} {m['recommendation']}")
 
-    # 알림 타입별 메시지
-    lines.append("")
+    # ----- 헤더 -----
+    title_map = {
+        AlertType.NORMAL: "✅ 정상",
+        AlertType.REBALANCE: "🔔 월간 리밸런싱",
+        AlertType.LIQUIDATE: "🚨 청산",
+        AlertType.RECOVER: "🟢 시장 회복",
+        AlertType.KILL_SWITCH: "🚨 비상 청산",
+    }
+    title = title_map.get(s.alert_type, "ℹ️")
+    lines = [f"🌅 {s.as_of} {title}"]
+
+    # ----- 시장 한 줄 요약 -----
+    ma_w = m.get("ma_window", 100)
+    pos = "MA위" if m["in_uptrend"] else "MA아래"
+    safety = "안전" if m["in_uptrend"] else "위험"
+    chg_1d = m.get("change_1d")
+    chg_5d = m.get("change_5d")
+    chg_text = ""
+    if chg_1d is not None:
+        chg_text = f" 어제 {_fmt_pct(chg_1d)}"
+    if chg_5d is not None:
+        chg_text += f" / 5d {_fmt_pct(chg_5d)}"
+    lines.append(f"📈 시장: {pos} {m['distance_pct']:+.1f}% ({safety}){chg_text}")
+    lines.append(f"   ↳ MA{ma_w} = 최근 {ma_w}거래일 평균선. 위면 추세 강세, 아래면 약세")
+
+    # ----- 알림 타입별 본문 -----
     if s.alert_type is AlertType.LIQUIDATE:
-        lines.append("🚨 즉시 행동: 전량 청산")
+        lines.append("")
+        lines.append("🚨 즉시 전량 청산 — 시장 약세 진입")
         for note in s.notes:
-            lines.append(f"  - {note}")
+            lines.append(f"  · {note}")
         if s.sells:
-            lines.append("")
-            lines.append(f"매도 종목 ({len(s.sells)}):")
+            lines.append(f"\n매도 {len(s.sells)}종목:")
             for h in s.sells:
                 shares = f" {h.target_shares}주" if h.target_shares else ""
-                lines.append(f"  🔴 {h.ticker} {h.name:<14}{shares}")
+                lines.append(f"  🔴 {h.ticker} {h.name}{shares}")
+
     elif s.alert_type is AlertType.RECOVER:
-        lines.append("✅ 시장 회복 — 매수 재개 신호")
+        lines.append("")
+        lines.append("🟢 시장 회복 — 다음 리밸런싱일에 매수 재개")
         for note in s.notes:
-            lines.append(f"  - {note}")
+            lines.append(f"  · {note}")
+
     elif s.alert_type is AlertType.REBALANCE:
-        lines.append(f"🔔 월간 리밸런싱 ({s.as_of})")
+        lines.append("")
+        lines.append(f"🔔 종목 갈아타기 ({len(s.sells)}↔{len(s.new_buys)})")
         if s.sells:
-            lines.append("")
-            lines.append(f"🔴 매도 ({len(s.sells)}):")
+            lines.append("\n🔴 매도:")
             for h in s.sells:
                 shares = f" {h.target_shares}주" if h.target_shares else ""
-                lines.append(f"  - {h.ticker} {h.name:<14}{shares}")
+                ret_5d = _fmt_pct(h.ret_5d)
+                lines.append(f"  · {h.ticker} {h.name}{shares} (5d {ret_5d})")
         if s.new_buys:
-            lines.append("")
-            lines.append(f"🟢 매수 ({len(s.new_buys)}):")
+            lines.append("\n🟢 매수:")
             for h in s.new_buys:
                 if h.target_value_won and h.target_shares:
+                    ret_1m = _fmt_pct(h.ret_1m)
                     lines.append(
-                        f"  + {h.ticker} {h.name:<14} 약 {h.target_shares}주 "
-                        f"(목표 {h.target_value_won:,.0f}원)"
+                        f"  · {h.ticker} {h.name} {h.target_shares}주 "
+                        f"({h.target_value_won // 10000:,.0f}만원, 1m {ret_1m})"
                     )
                 else:
-                    lines.append(f"  + {h.ticker} {h.name}")
-        lines.append("")
-        lines.append("📲 한국투자증권 앱에서 위 주문 실행")
-    else:  # NORMAL
-        lines.append("✅ 보유 유지 — 행동 없음")
-        if s.holdings:
-            lines.append("")
-            lines.append(f"💼 보유 종목 ({len(s.holdings)}):")
-            for h in s.holdings:
-                if h.target_value_won and h.target_shares:
-                    lines.append(
-                        f"  {h.ticker} {h.name:<14} {h.target_shares}주 "
-                        f"({h.target_value_won:,.0f}원)"
-                    )
-                else:
-                    lines.append(f"  {h.ticker} {h.name}")
+                    lines.append(f"  · {h.ticker} {h.name}")
+        lines.append("\n📲 한투 앱에서 주문 실행")
 
+    else:  # NORMAL
+        if s.holdings:
+            # 보유 종목 — 1d/5d 수익률, 비중 표시
+            avg_1d = [h.ret_1d for h in s.holdings if h.ret_1d is not None]
+            avg_5d = [h.ret_5d for h in s.holdings if h.ret_5d is not None]
+            port_1d = sum(avg_1d) / len(avg_1d) if avg_1d else None
+            port_5d = sum(avg_5d) / len(avg_5d) if avg_5d else None
+            if port_1d is not None:
+                lines.append(f"💼 포트폴리오: 어제 {_fmt_pct(port_1d)} / 5d {_fmt_pct(port_5d)}")
+            lines.append("")
+            lines.append(f"📦 보유 {len(s.holdings)}종목 (1d / 5d):")
+            for h in s.holdings:
+                shares = f"{h.target_shares}주" if h.target_shares else "─"
+                ret_1d = _fmt_pct(h.ret_1d)
+                ret_5d = _fmt_pct(h.ret_5d)
+                lines.append(
+                    f"  {_ret_icon(h.ret_1d)} {h.ticker} {h.name:<10} "
+                    f"{shares:<6} {ret_1d:>7} / {ret_5d:>7}"
+                )
+
+            # 가장 좋은/나쁜
+            valid = [h for h in s.holdings if h.ret_5d is not None]
+            if valid:
+                best = max(valid, key=lambda x: x.ret_5d)
+                worst = min(valid, key=lambda x: x.ret_5d)
+                lines.append("")
+                lines.append(f"🏆 5d 최고: {best.name} ({_fmt_pct(best.ret_5d)})")
+                lines.append(f"⚠️ 5d 최저: {worst.name} ({_fmt_pct(worst.ret_5d)})")
+
+        lines.append("")
+        lines.append("🎯 행동: 보유 유지")
+
+    # ----- 푸터 -----
     if s.next_rebalance:
         days = (s.next_rebalance - s.as_of).days
-        lines.append("")
-        lines.append(f"🔔 다음 리밸런싱: {s.next_rebalance} ({days}일 후)")
+        lines.append(f"🔔 다음 매매: {s.next_rebalance} ({days}일 후)")
 
     return "\n".join(lines)
