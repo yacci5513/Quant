@@ -73,10 +73,16 @@ def execute_rebalance(
     seed = seed_override if seed_override is not None else _check_seed()
     s = get_settings()
 
-    # 1. 챔피언 시그널 + 현재 보유
-    signal = compute_daily_signal(seed_won=float(seed))
+    # 1. 현재 보유 먼저 조회 → 시그널에 매입가/손익 주입 (텔레그램 알림용)
     holdings = get_balance()
     held_map = {h.ticker: h for h in holdings}
+
+    # 2. 챔피언 시그널 — .env의 multi_regime 설정 반영
+    signal = compute_daily_signal(
+        seed_won=float(seed),
+        multi_regime=s.strategy_multi_regime,
+        balance_map=held_map,
+    )
 
     sells_orders: list[OrderResult] = []
     buys_orders: list[OrderResult] = []
