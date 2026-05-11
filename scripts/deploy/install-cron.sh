@@ -17,9 +17,10 @@ if [[ ! -x "$DAILY_JOB" ]]; then
     chmod +x "$DAILY_JOB"
 fi
 
-# cron 라인 — 평일 08:30 KST (장 시작 09:00 30분 전, 매수 결정 시간)
-CRON_LINE="30 8 * * 1-5 ${DAILY_JOB}"
-COMMENT="# quant: daily signal + telegram (평일 08:30 KST, 장 시작 30분 전)"
+# cron 라인 — KST 08:30 월~금 (장 시작 09:00 30분 전, 매수 결정 시간)
+# 서버는 UTC. KST = UTC+9 → KST 08:30 월~금 = UTC 23:30 일~목 (요일 -1 주의)
+CRON_LINE="30 23 * * 0-4 ${DAILY_JOB}"
+COMMENT="# quant: daily signal + telegram (KST 08:30 월~금 = UTC 23:30 일~목)"
 
 # 기존 cron에 quant 라인 있으면 제거 후 재등록
 TMP_CRON=$(mktemp)

@@ -18,6 +18,8 @@ from __future__ import annotations
 import contextlib
 from dataclasses import dataclass
 
+from tenacity import RetryError
+
 from quant.backtest.risk import (
     ExposureLimits,
     KillSwitchConfig,
@@ -34,6 +36,9 @@ from quant.live.client import (
     order_cash,
 )
 from quant.notify.telegram import send_telegram
+
+# tenacity가 KISError를 재시도 후 RetryError로 wrap해서 던지므로 둘 다 잡아야 함
+_OrderExc = (KISError, RetryError)
 
 
 @dataclass
@@ -101,7 +106,7 @@ def execute_rebalance(
             try:
                 r = order_cash(ticker=h.ticker, quantity=h.quantity, side="sell", price=None)
                 sells_orders.append(r)
-            except KISError as e:
+            except _OrderExc as e:
                 skipped.append(f"매도 실패 {h.ticker}: {e}")
 
     elif signal.alert_type in {AlertType.NORMAL, AlertType.REBALANCE}:
@@ -119,7 +124,7 @@ def execute_rebalance(
             try:
                 r = order_cash(ticker=ticker, quantity=h.quantity, side="sell", price=None)
                 sells_orders.append(r)
-            except KISError as e:
+            except _OrderExc as e:
                 skipped.append(f"매도 실패 {ticker}: {e}")
 
         # 매수: 시그널 보유 - 실제 보유 + 부족분
@@ -135,7 +140,7 @@ def execute_rebalance(
             try:
                 r = order_cash(ticker=ticker, quantity=need, side="buy", price=None)
                 buys_orders.append(r)
-            except KISError as e:
+            except _OrderExc as e:
                 skipped.append(f"매수 실패 {ticker}: {e}")
 
     if notify:
