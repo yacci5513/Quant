@@ -426,15 +426,11 @@ def _ret_icon(v: float | None) -> str:
     return "⚪"
 
 
-def _fmt_won(v: float | None, *, unit: str = "K") -> str:
-    """원 → K(천) 단위 포맷. None 처리."""
+def _fmt_won(v: float | None) -> str:
+    """원 → 만원 단위 (소수점 1자리). 한국 금융 관행. None 처리."""
     if v is None:
         return "─"
-    if unit == "K":
-        return f"{v / 1000:,.0f}K"
-    if unit == "만":
-        return f"{v / 10000:,.0f}만"
-    return f"{v:,.0f}원"
+    return f"{v / 10000:,.1f}만"
 
 
 def _render_balance_section(signal: DailySignal) -> list[str]:
