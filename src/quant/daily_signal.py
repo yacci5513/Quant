@@ -86,7 +86,9 @@ class DailySignal:
     balance_total_eval: float | None = None  # 평가합계
     balance_total_cost: float | None = None  # 매입합계
     balance_total_profit: float | None = None  # 평가손익 합계
-    balance_total_profit_pct: float | None = None  # 평가손익률
+    balance_total_profit_pct: float | None = None  # 누적 평가손익률 (매입 대비)
+    balance_change_1d_won: float | None = None  # 1일 변동액 (어제 평가 → 오늘 평가)
+    balance_change_1d_pct: float | None = None  # 1일 변동률
     has_balance: bool = False  # 실잔고 조회 성공 여부
 
 
@@ -270,12 +272,28 @@ def compute_daily_signal(
 
     # 잔고 합계 (실잔고가 있으면 채움, 없으면 None)
     bal_eval = bal_cost = bal_profit = bal_profit_pct = None
+    bal_change_1d_won = bal_change_1d_pct = None
     has_balance = balance_map is not None and len(balance_map) > 0
     if has_balance:
-        bal_eval = sum(h.eval_amount for h in balance_map.values())
+        # 일관성 위해 모든 평가는 prices.iloc[-1] 종가 기반 (KIS current_price 대신)
+        today_prices = prices.iloc[-1]
+        bal_eval = sum(
+            h.quantity * float(today_prices.get(h.ticker, h.current_price))
+            for h in balance_map.values()
+        )
         bal_cost = sum(h.avg_price * h.quantity for h in balance_map.values())
         bal_profit = bal_eval - bal_cost if bal_cost else None
         bal_profit_pct = (bal_profit / bal_cost * 100.0) if bal_cost else None
+        # 1일 변동 — 직전 영업일 평가 vs 오늘 평가
+        if len(prices) >= 2:
+            yesterday_prices = prices.iloc[-2]
+            yesterday_eval = sum(
+                h.quantity * float(yesterday_prices.get(h.ticker, h.avg_price))
+                for h in balance_map.values()
+            )
+            if yesterday_eval > 0:
+                bal_change_1d_won = bal_eval - yesterday_eval
+                bal_change_1d_pct = bal_change_1d_won / yesterday_eval * 100.0
 
     def _make_signal(**kw) -> DailySignal:
         """공통 필드 (잔고 총계 등) 채워서 DailySignal 생성."""
@@ -287,6 +305,8 @@ def compute_daily_signal(
             balance_total_cost=bal_cost,
             balance_total_profit=bal_profit,
             balance_total_profit_pct=bal_profit_pct,
+            balance_change_1d_won=bal_change_1d_won,
+            balance_change_1d_pct=bal_change_1d_pct,
             has_balance=has_balance,
             **kw,
         )
@@ -425,7 +445,26 @@ def _render_balance_section(signal: DailySignal) -> list[str]:
 
     lines: list[str] = [""]
     n = sum(1 for h in s.holdings if h.actual_shares)
-    lines.append(f"💼 잔고 {n}종목 (평가 {_fmt_won(s.balance_total_eval)})")
+
+    # 핵심 손익 1줄 — 1일 변동 + 누적
+    chg_1d = ""
+    if s.balance_change_1d_pct is not None:
+        sign1d = "+" if s.balance_change_1d_won >= 0 else "−"
+        chg_1d = (
+            f"오늘 {s.balance_change_1d_pct:+.2f}% "
+            f"({sign1d}{_fmt_won(abs(s.balance_change_1d_won))}) / "
+        )
+    cum = ""
+    if s.balance_total_profit_pct is not None:
+        sign_c = "+" if s.balance_total_profit >= 0 else "−"
+        cum = (
+            f"누적 {s.balance_total_profit_pct:+.2f}% "
+            f"({sign_c}{_fmt_won(abs(s.balance_total_profit))})"
+        )
+    lines.append(f"💼 {chg_1d}{cum}")
+    lines.append(
+        f"   잔고 {n}종목 · 평가 {_fmt_won(s.balance_total_eval)} (매입 {_fmt_won(s.balance_total_cost)})"
+    )
 
     # 실보유 종목만 (actual_shares > 0)
     actual = [h for h in s.holdings if h.actual_shares and h.actual_shares > 0]
@@ -452,19 +491,6 @@ def _render_balance_section(signal: DailySignal) -> list[str]:
             else:
                 price_man = (h.last_close or 0) / 10000
                 lines.append(f"   {h.name} 1주 {price_man:,.0f}만 (시드 부족)")
-
-    # 손익 합계
-    if s.balance_total_cost:
-        lines.append("")
-        lines.append(
-            f"💰 매입 {_fmt_won(s.balance_total_cost)} → 평가 {_fmt_won(s.balance_total_eval)}"
-        )
-        if s.balance_total_profit is not None:
-            sign = "+" if s.balance_total_profit >= 0 else ""
-            lines.append(
-                f"   손익 {sign}{_fmt_won(abs(s.balance_total_profit))} "
-                f"({s.balance_total_profit_pct:+.2f}%)"
-            )
 
     # TOP/BOT 손익률 (실잔고 기준)
     valid = [h for h in actual if h.profit_pct is not None]
@@ -516,13 +542,13 @@ def render_alert(signal: DailySignal) -> str:
     s = signal
     m = s.market_state
 
-    # ----- 헤더 -----
+    # ----- 헤더 — 시그널 타입을 명시적으로 (NORMAL/REBALANCE/LIQUIDATE/...) -----
     title_map = {
-        AlertType.NORMAL: "✅ 정상",
-        AlertType.REBALANCE: "🔔 리밸런싱",
-        AlertType.LIQUIDATE: "🚨 청산",
-        AlertType.RECOVER: "🟢 시장 회복",
-        AlertType.KILL_SWITCH: "🚨 비상 청산",
+        AlertType.NORMAL: "✅ NORMAL — 보유 유지",
+        AlertType.REBALANCE: "🔔 REBALANCE — 리밸런싱 매매일",
+        AlertType.LIQUIDATE: "🚨 LIQUIDATE — 청산",
+        AlertType.RECOVER: "🟢 RECOVER — 시장 회복",
+        AlertType.KILL_SWITCH: "🚨 KILL SWITCH — 비상",
     }
     title = title_map.get(s.alert_type, "ℹ️")
     lines = [f"🌅 {s.as_of} {title}"]
