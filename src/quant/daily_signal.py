@@ -20,7 +20,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 
@@ -82,6 +82,8 @@ class DailySignal:
     sells: list[HoldingRow]  # 리밸런싱 시 매도
     next_rebalance: date | None  # 다음 리밸런싱일
     notes: list[str]  # 추가 알림 (Kill switch 사유 등)
+    # KIS 실잔고 전체 (시그널 종목과 무관, 잔고 알림에 표시됨)
+    actual_holdings: list[HoldingRow] = field(default_factory=list)
     # KIS 실잔고 종합 (조회 실패 시 None)
     balance_total_eval: float | None = None  # 평가합계
     balance_total_cost: float | None = None  # 매입합계
@@ -270,11 +272,31 @@ def compute_daily_signal(
     last_close = prices.iloc[-1]
     notes: list[str] = []
 
-    # 잔고 합계 (실잔고가 있으면 채움, 없으면 None)
+    # 잔고 합계 + 실잔고 종목 리스트
     bal_eval = bal_cost = bal_profit = bal_profit_pct = None
     bal_change_1d_won = bal_change_1d_pct = None
+    actual_holdings_rows: list[HoldingRow] = []
     has_balance = balance_map is not None and len(balance_map) > 0
     if has_balance:
+        # 실잔고 모든 종목을 HoldingRow로 변환 (시그널과 무관, 알림용)
+        for ticker, h in balance_map.items():
+            close = float(prices.iloc[-1].get(ticker, h.current_price))
+            actual_holdings_rows.append(
+                HoldingRow(
+                    ticker=ticker,
+                    name=name_map.get(ticker, h.name or "?"),
+                    weight=0.0,
+                    last_close=close,
+                    ret_1d=_recent_return(prices, ticker, 1),
+                    ret_5d=_recent_return(prices, ticker, 5),
+                    ret_1m=_recent_return(prices, ticker, 21),
+                    actual_shares=h.quantity,
+                    avg_price=h.avg_price,
+                    eval_amount=h.eval_amount,
+                    profit=h.profit,
+                    profit_pct=h.profit_pct,
+                )
+            )
         # 일관성 위해 모든 평가는 prices.iloc[-1] 종가 기반 (KIS current_price 대신)
         today_prices = prices.iloc[-1]
         bal_eval = sum(
@@ -308,6 +330,7 @@ def compute_daily_signal(
             balance_change_1d_won=bal_change_1d_won,
             balance_change_1d_pct=bal_change_1d_pct,
             has_balance=has_balance,
+            actual_holdings=actual_holdings_rows,
             **kw,
         )
 
@@ -440,7 +463,7 @@ def _render_balance_section(signal: DailySignal) -> list[str]:
         return []
 
     lines: list[str] = [""]
-    n = sum(1 for h in s.holdings if h.actual_shares)
+    n = len(s.actual_holdings)
 
     # 핵심 손익 1줄 — 1일 변동 + 누적
     chg_1d = ""
@@ -462,20 +485,23 @@ def _render_balance_section(signal: DailySignal) -> list[str]:
         f"   잔고 {n}종목 · 평가 {_fmt_won(s.balance_total_eval)} (매입 {_fmt_won(s.balance_total_cost)})"
     )
 
-    # 실보유 종목만 (actual_shares > 0)
-    actual = [h for h in s.holdings if h.actual_shares and h.actual_shares > 0]
-    for h in actual:
+    # 실잔고 모든 종목 (매도 예정 종목도 포함) — KIS balance 전부 표시
+    sell_set = {h.ticker for h in s.sells}
+    for h in s.actual_holdings:
         icon = _ret_icon(h.ret_1d)
         close = int(h.last_close) if h.last_close else 0
         avg = int(h.avg_price) if h.avg_price else 0
         pp = h.profit_pct if h.profit_pct is not None else 0.0
         eval_k = _fmt_won(h.eval_amount)
+        mark = " 🔴매도예정" if h.ticker in sell_set else ""
         lines.append(
-            f"{icon} {h.name} {h.actual_shares}주 @{avg:,}→{close:,} " f"({pp:+.1f}%) {eval_k}"
+            f"{icon} {h.name} {h.actual_shares}주 @{avg:,}→{close:,} "
+            f"({pp:+.1f}%) {eval_k}{mark}"
         )
 
-    # 시그널엔 있는데 아직 안 산 종목 (목표지만 미보유)
-    not_bought = [h for h in s.holdings if not h.actual_shares]
+    # 시그널 권고 중 아직 미보유 종목 (매수 예정)
+    actual_tickers = {h.ticker for h in s.actual_holdings}
+    not_bought = [h for h in s.holdings if h.ticker not in actual_tickers]
     if not_bought:
         lines.append("")
         lines.append(f"📋 시그널 권고 + 미보유 {len(not_bought)}종목:")
@@ -489,7 +515,7 @@ def _render_balance_section(signal: DailySignal) -> list[str]:
                 lines.append(f"   {h.name} 1주 {price_man:,.0f}만 (시드 부족)")
 
     # TOP/BOT 손익률 (실잔고 기준)
-    valid = [h for h in actual if h.profit_pct is not None]
+    valid = [h for h in s.actual_holdings if h.profit_pct is not None]
     if len(valid) >= 2:
         best = max(valid, key=lambda x: x.profit_pct)
         worst = min(valid, key=lambda x: x.profit_pct)
