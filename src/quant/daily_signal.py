@@ -278,16 +278,34 @@ def compute_daily_signal(
     actual_holdings_rows: list[HoldingRow] = []
     has_balance = balance_map is not None and len(balance_map) > 0
     if has_balance:
-        # 실잔고 모든 종목을 HoldingRow로 변환 (시그널과 무관, 알림용)
+        # KIS 응답 기반 1일 변동 — 종목별 quote.change (전일 대비 원 차이) × 수량 합계
+        # KIS API 호출 추가됨 (잔고 종목 ~10개라 부담 적음)
+        per_ticker_change_won: dict[str, float] = {}
+        try:
+            from quant.live.client import get_quote
+
+            for ticker in balance_map:
+                try:
+                    q = get_quote(ticker)
+                    per_ticker_change_won[ticker] = q.change  # 전일 대비 원
+                except Exception:
+                    per_ticker_change_won[ticker] = 0.0
+        except Exception as e:
+            logger.warning(f"KIS 1d quote 조회 실패 (graceful): {e}")
+
+        # 실잔고 모든 종목을 HoldingRow로 변환 (KIS 데이터 일관)
         for ticker, h in balance_map.items():
-            close = float(prices.iloc[-1].get(ticker, h.current_price))
+            change_won = per_ticker_change_won.get(ticker, 0.0)
+            # 종목별 1일 변동률 — (current - prdy_close) / prdy_close
+            prdy_close = h.current_price - change_won if change_won else None
+            ret_1d_kis = (change_won / prdy_close) if prdy_close and prdy_close > 0 else None
             actual_holdings_rows.append(
                 HoldingRow(
                     ticker=ticker,
                     name=name_map.get(ticker, h.name or "?"),
                     weight=0.0,
-                    last_close=close,
-                    ret_1d=_recent_return(prices, ticker, 1),
+                    last_close=h.current_price,  # KIS 실시간 (손익률과 일관)
+                    ret_1d=ret_1d_kis,
                     ret_5d=_recent_return(prices, ticker, 5),
                     ret_1m=_recent_return(prices, ticker, 21),
                     actual_shares=h.quantity,
@@ -297,25 +315,21 @@ def compute_daily_signal(
                     profit_pct=h.profit_pct,
                 )
             )
-        # 일관성 위해 모든 평가는 prices.iloc[-1] 종가 기반 (KIS current_price 대신)
-        today_prices = prices.iloc[-1]
-        bal_eval = sum(
-            h.quantity * float(today_prices.get(h.ticker, h.current_price))
-            for h in balance_map.values()
-        )
+        # 잔고 합계 — KIS 응답 직접 사용 (current_price × quantity 또는 evlu_amt)
+        bal_eval = sum(h.eval_amount for h in balance_map.values())
         bal_cost = sum(h.avg_price * h.quantity for h in balance_map.values())
         bal_profit = bal_eval - bal_cost if bal_cost else None
         bal_profit_pct = (bal_profit / bal_cost * 100.0) if bal_cost else None
-        # 1일 변동 — 직전 영업일 평가 vs 오늘 평가
-        if len(prices) >= 2:
-            yesterday_prices = prices.iloc[-2]
-            yesterday_eval = sum(
-                h.quantity * float(yesterday_prices.get(h.ticker, h.avg_price))
-                for h in balance_map.values()
+        # 1일 변동 — 종목별 change_won × quantity 합계
+        bal_change_1d_won = sum(
+            per_ticker_change_won.get(h.ticker, 0.0) * h.quantity for h in balance_map.values()
+        )
+        if bal_eval > 0:
+            # (오늘 평가 - 어제 평가) / 어제 평가 = change / (eval - change)
+            yesterday_eval = bal_eval - bal_change_1d_won
+            bal_change_1d_pct = (
+                (bal_change_1d_won / yesterday_eval * 100.0) if yesterday_eval > 0 else None
             )
-            if yesterday_eval > 0:
-                bal_change_1d_won = bal_eval - yesterday_eval
-                bal_change_1d_pct = bal_change_1d_won / yesterday_eval * 100.0
 
     def _make_signal(**kw) -> DailySignal:
         """공통 필드 (잔고 총계 등) 채워서 DailySignal 생성."""
@@ -379,52 +393,37 @@ def compute_daily_signal(
                 notes=notes,
             )
 
-    # 리밸런싱 도래 감지 — 오늘이 마지막 리밸런싱이거나 아주 최근
-    is_rb_today = pd.Timestamp(today) == last_rb_date
-    if is_rb_today:
-        # 직전 리밸런싱 가중치와 오늘 가중치 차이
-        prior_dates = rb_dates[rb_dates < last_rb_date]
-        prev_holdings = (
-            weights.loc[prior_dates[-1]] if len(prior_dates) > 0 else pd.Series(dtype=float)
-        )
-        cur_holdings = weights.loc[last_rb_date]
-        prev_set = set(prev_holdings[prev_holdings > 0].index) if not prev_holdings.empty else set()
-        cur_set = set(cur_holdings[cur_holdings > 0].index)
-        sell_tickers = prev_set - cur_set
-        buy_tickers = cur_set - prev_set
-        # 매도 후보는 실잔고 매핑 함께 (현재 보유 가격/손익 알림용)
-        sells = _to_holding_rows(
-            prev_holdings[list(sell_tickers)] if sell_tickers else pd.Series(dtype=float),
-            last_close,
-            name_map,
-            seed_won,
-            prices,
-            balance_map,
-        )
-        new_buys = _to_holding_rows(
-            cur_holdings[list(buy_tickers)] if buy_tickers else pd.Series(dtype=float),
-            last_close,
-            name_map,
-            seed_won,
-            prices,
-        )
-        holdings = _to_holding_rows(
-            cur_holdings, last_close, name_map, seed_won, prices, balance_map
-        )
+    # 리밸런싱 판정 — 실잔고 vs 시그널 목표 차이 (가중치 변경 자체 X)
+    # multi_regime=true에서 매일 weights가 미세하게 바뀌는 노이즈를 무시하기 위함
+    cur_holdings = weights.loc[last_rb_date]
+    # 시그널 종목 중 매수 가능한 것만 (target_shares > 0)
+    target_rows = _to_holding_rows(
+        cur_holdings, last_close, name_map, seed_won, prices, balance_map
+    )
+    target_buyable_set = {h.ticker for h in target_rows if h.target_shares and h.target_shares > 0}
+    actual_set = {h.ticker for h in actual_holdings_rows}
+
+    sell_tickers = actual_set - target_buyable_set
+    buy_tickers = target_buyable_set - actual_set
+    needs_action = bool(sell_tickers) or bool(buy_tickers)
+
+    if needs_action:
+        # 매도: 실잔고에서 시그널이 빠진 종목 (KIS 매입가·평가 포함)
+        sells = [h for h in actual_holdings_rows if h.ticker in sell_tickers]
+        # 매수: 시그널에 새로 들어온 종목
+        new_buys = [h for h in target_rows if h.ticker in buy_tickers]
         return _make_signal(
             alert_type=AlertType.REBALANCE,
-            holdings=holdings,
+            holdings=target_rows,
             new_buys=new_buys,
             sells=sells,
             notes=notes,
         )
 
-    # 정상 — 보유 유지
-    cur_holdings = weights.loc[last_rb_date]
-    holdings = _to_holding_rows(cur_holdings, last_close, name_map, seed_won, prices, balance_map)
+    # 정상 — 실잔고가 시그널과 일치
     return _make_signal(
         alert_type=AlertType.NORMAL,
-        holdings=holdings,
+        holdings=target_rows,
         new_buys=[],
         sells=[],
         notes=notes,
