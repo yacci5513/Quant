@@ -34,6 +34,9 @@ from quant.strategies.low_volatility import LowVolatilityConfig
 from quant.strategies.low_volatility import generate_weights as lv_w
 from quant.strategies.momentum_topn import MomentumTopNConfig, generate_weights
 
+# 단일 종목 최대 노출 (시드 대비 비율) — 1주 가격이 이걸 초과하면 매수 차단
+_MAX_POSITION_PCT = 0.20
+
 # 챔피언 정책 #6 — 강세에 모멘텀, 약세엔 저변동성, 변동성 큰 강세엔 60/40
 CHAMPION_POLICY_B = RegimePolicy(
     bull_strong={"momentum": 1.0},
@@ -147,7 +150,14 @@ def _to_holding_rows(
     for ticker, w in weights[weights > 0].sort_values(ascending=False).items():
         close = float(last_close.get(ticker, float("nan")))
         target_value = seed_won * w if seed_won else None
-        target_shares = int(target_value // close) if target_value and close > 0 else None
+        # 종목 1주 가격이 시드의 _MAX_POSITION_PCT 넘으면 매수 차단 (단일 종목 집중 방지)
+        if seed_won and close > 0 and close > seed_won * _MAX_POSITION_PCT:
+            # 1주 가격이 시드의 20% 초과 → 매수 차단
+            target_shares = 0
+        elif target_value and close > 0:
+            target_shares = int(target_value // close)
+        else:
+            target_shares = None
         ret_1d = _recent_return(prices, ticker, 1) if prices is not None else None
         ret_5d = _recent_return(prices, ticker, 5) if prices is not None else None
         ret_1m = _recent_return(prices, ticker, 21) if prices is not None else None

@@ -36,6 +36,35 @@ TR_ORDER_SELL_PAPER = "VTTC0801U"
 TR_ORDER_SELL_LIVE = "TTTC0801U"
 
 
+def round_to_tick(price: float) -> int:
+    """KOSPI/KOSDAQ 가격대별 호가 단위에 맞춰 라운드 (내림).
+
+    호가 단위 (2024 KRX 기준):
+      < 2,000원        : 1원
+      2,000 ~ 5,000     : 5원
+      5,000 ~ 20,000    : 10원
+      20,000 ~ 50,000   : 50원
+      50,000 ~ 200,000  : 100원
+      200,000 ~ 500,000 : 500원
+      >= 500,000        : 1,000원
+    """
+    if price < 2_000:
+        tick = 1
+    elif price < 5_000:
+        tick = 5
+    elif price < 20_000:
+        tick = 10
+    elif price < 50_000:
+        tick = 50
+    elif price < 200_000:
+        tick = 100
+    elif price < 500_000:
+        tick = 500
+    else:
+        tick = 1_000
+    return int(price // tick) * tick
+
+
 class KISError(RuntimeError):
     """KIS API 호출 실패 (rt_cd != '0' 또는 HTTP 에러)."""
 

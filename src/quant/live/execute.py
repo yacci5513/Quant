@@ -34,8 +34,12 @@ from quant.live.client import (
     get_balance,
     get_quote,
     order_cash,
+    round_to_tick,
 )
 from quant.notify.telegram import send_telegram
+
+# 지정가 매수 시 어제 종가 대비 허용 프리미엄 (슬리피지 방지용 상한)
+BUY_LIMIT_PREMIUM = 0.005  # +0.5%
 
 # tenacity가 KISError를 재시도 후 RetryError로 wrap해서 던지므로 둘 다 잡아야 함
 _OrderExc = (KISError, RetryError)
@@ -134,17 +138,22 @@ def execute_rebalance(
                 skipped.append(f"매도 실패 {ticker}: {e}")
 
         # 매수: 시그널 보유 - 실제 보유 + 부족분
+        # 지정가 = 어제 종가 × (1 + BUY_LIMIT_PREMIUM), 호가 단위 라운드
+        # 슬리피지 방지. 단 가격 급등 시 미체결 가능 (다음날 09:30 재시도)
         for ticker in target_tickers:
             target = target_tickers[ticker]
             actual_qty = held_map.get(ticker)
             need = target.target_shares - (actual_qty.quantity if actual_qty else 0)
             if need <= 0:
                 continue
+            limit_price = None
+            if target.last_close:
+                limit_price = round_to_tick(target.last_close * (1 + BUY_LIMIT_PREMIUM))
             if dry_run:
-                buys_orders.append(_dry_order(ticker, need, "buy", target.last_close))
+                buys_orders.append(_dry_order(ticker, need, "buy", limit_price))
                 continue
             try:
-                r = order_cash(ticker=ticker, quantity=need, side="buy", price=None)
+                r = order_cash(ticker=ticker, quantity=need, side="buy", price=limit_price)
                 buys_orders.append(r)
             except _OrderExc as e:
                 skipped.append(f"매수 실패 {ticker}: {e}")
