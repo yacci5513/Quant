@@ -72,10 +72,13 @@ class KISError(RuntimeError):
 @dataclass
 class Quote:
     ticker: str
-    price: float
+    price: float  # 현재가
     volume: int
-    change: float  # 전일 대비
-    change_pct: float
+    change: float  # 전일 종가 대비 (원)
+    change_pct: float  # 전일 종가 대비 (%)
+    open_price: float = 0.0  # 오늘 시가 (장중 흐름 계산용)
+    high: float = 0.0
+    low: float = 0.0
 
 
 @dataclass
@@ -166,6 +169,9 @@ def get_quote(ticker: str) -> Quote:
         volume=int(output.get("acml_vol", 0)),
         change=float(output.get("prdy_vrss", 0)),
         change_pct=float(output.get("prdy_ctrt", 0)),
+        open_price=float(output.get("stck_oprc", 0)),
+        high=float(output.get("stck_hgpr", 0)),
+        low=float(output.get("stck_lwpr", 0)),
     )
 
 

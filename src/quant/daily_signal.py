@@ -26,7 +26,7 @@ from enum import Enum
 
 import pandas as pd
 
-from quant.backtest.regime import RegimeMode, filter_weights, regime_state
+from quant.backtest.regime import regime_state
 from quant.backtest.regime_strategy import RegimePolicy, combine_by_regime
 from quant.common.logger import logger
 from quant.data.price.fetch_krx import load_close_panel, load_value_panel
@@ -295,11 +295,12 @@ def compute_daily_signal(
         base_weights = weights  # 청산 메시지 시 보유 종목 = 현재
     else:
         # 단일 챔피언 — Top-(N+spare)로 확장해서 시드 부족 종목 자동 대체 (cur_holdings 단계)
+        # MA100 시장 청산 가드 제거: 강세장 외삽 상태에선 MA100이 너무 멀어 의미 없음.
+        # 종목별 손절·익절·트레일링 + 포트 Kill switch가 위험 관리 (execute.py)
         cfg_spare = replace(cfg, top_n=cfg.top_n + _SPARE_TOP_N)
         base_weights = generate_weights(prices, values=values, config=cfg_spare)
-        weights, exposure = filter_weights(
-            prices, base_weights, mode=RegimeMode.BINARY, ma_window=ma_window
-        )
+        weights = base_weights
+        exposure = (weights.sum(axis=1) > 1e-6).astype(float)
 
     # 마지막 리밸런싱 일자 (가중치가 변한 마지막 날)
     weight_change = weights.diff().abs().sum(axis=1)

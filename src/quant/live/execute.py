@@ -36,6 +36,13 @@ from quant.live.client import (
     order_cash,
     round_to_tick,
 )
+from quant.live.trailing import (
+    check_trail_trigger,
+    load_trailing,
+    prune_stale,
+    save_trailing,
+    update_max,
+)
 from quant.notify.telegram import send_telegram
 
 # 지정가 매수 시 어제 종가 대비 허용 프리미엄 (슬리피지 방지용 상한)
@@ -120,9 +127,16 @@ def execute_rebalance(
         )
 
     def _today_change_pct(ticker: str) -> float:
-        """KIS get_quote의 당일 변동률 (%) — 실패 시 0."""
+        """장중 흐름 (오늘 시가 → 현재가 %, 갭 분리). 실패 시 0.
+
+        예) 시가 95,000 + 현재 96,000 → +1.05%. 어제 종가 대비가 아니라
+        장중 회복 추세를 정확히 잡기 위함.
+        """
         try:
-            return get_quote(ticker).change_pct
+            q = get_quote(ticker)
+            if q.open_price > 0:
+                return (q.price - q.open_price) / q.open_price * 100.0
+            return q.change_pct  # 시가 0 (장 시작 전 등) fallback
         except Exception:
             return 0.0
 
@@ -159,7 +173,14 @@ def execute_rebalance(
                 logger.warning(f"텔레그램 발송 실패: {e}")
         return ExecutionResult(sells=sells_orders, buys=buys_orders, skipped=skipped, notes=notes)
 
-    # 2b. 종목별 손절·익절 (당일 추세 가드 포함) — 시그널과 별개
+    # 2b. 종목별 손절·익절·트레일링 (당일 추세 가드 포함)
+    # 트레일링 데이터 로드 + 보유 종목 max_profit_pct 갱신
+    trail = load_trailing()
+    prune_stale(trail, {h.ticker for h in holdings})
+    for h in holdings:
+        if h.profit_pct is not None:
+            update_max(h.ticker, h.profit_pct, trail)
+
     forced_sells: set[str] = set()
     for h in holdings:
         pp = h.profit_pct
@@ -167,18 +188,31 @@ def execute_rebalance(
             continue
         hit_stop = pp <= STOP_LOSS_PCT
         hit_take = pp >= TAKE_PROFIT_PCT
-        if not (hit_stop or hit_take):
+        hit_trail, max_seen = check_trail_trigger(h.ticker, pp, trail)
+        if not (hit_stop or hit_take or hit_trail):
             continue
         today_chg = _today_change_pct(h.ticker)
         # 손절: 당일 +X% 회복 추세면 보류
-        if hit_stop and today_chg >= TREND_GUARD_STOP:
+        if hit_stop and not (hit_take or hit_trail) and today_chg >= TREND_GUARD_STOP:
             notes.append(f"⏸ {h.ticker} 손절 보류 ({pp:+.1f}%, 당일 {today_chg:+.1f}% 회복 추세)")
             continue
         # 익절: 당일 +Y% 상승 추세면 보류 (더 갈 수도)
-        if hit_take and today_chg >= TREND_GUARD_PROFIT:
+        if hit_take and not hit_trail and today_chg >= TREND_GUARD_PROFIT:
             notes.append(f"⏸ {h.ticker} 익절 보류 ({pp:+.1f}%, 당일 {today_chg:+.1f}% 상승 추세)")
             continue
-        reason = "💰 손절" if hit_stop else "🎯 익절"
+        # 트레일링: 당일 회복 추세 가드 동일 적용 (당일 +X% 회복 시 보류)
+        if hit_trail and not hit_take and today_chg >= TREND_GUARD_STOP:
+            notes.append(
+                f"⏸ {h.ticker} 트레일링 보류 (최고 {max_seen:+.1f}% → {pp:+.1f}%, "
+                f"당일 {today_chg:+.1f}% 회복)"
+            )
+            continue
+        if hit_trail:
+            reason = f"📉 트레일링 (최고 {max_seen:+.1f}% → 현재 {pp:+.1f}%)"
+        elif hit_stop:
+            reason = "💰 손절"
+        else:
+            reason = "🎯 익절"
         notes.append(f"{reason} {h.ticker} {pp:+.1f}% (당일 {today_chg:+.1f}%)")
         if dry_run:
             sells_orders.append(_dry_order(h.ticker, h.quantity, "sell", h.current_price))
@@ -190,6 +224,12 @@ def execute_rebalance(
             forced_sells.add(h.ticker)
         except _OrderExc as e:
             skipped.append(f"매도 실패 {h.ticker}: {e}")
+
+    # 트레일링 데이터 저장 (갱신된 max_profit_pct)
+    try:
+        save_trailing(trail)
+    except Exception as e:
+        logger.warning(f"trailing.json 저장 실패: {e}")
 
     # 2c. 시그널 처리 (LIQUIDATE / NORMAL / REBALANCE)
     if signal.alert_type is AlertType.LIQUIDATE:
