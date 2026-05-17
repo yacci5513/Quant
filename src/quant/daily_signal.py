@@ -1233,8 +1233,8 @@ def render_hourly_balance(hb: HourlyBalance) -> str:
             cost_str = f"매입 {cost_won / 10000:,.1f}만"
             pp_str = f"{h.profit_pct:+.1f}%" if h.profit_pct is not None else "—"
             today_str = f"오늘 {h.ret_1d * 100:+.2f}%" if h.ret_1d is not None else "오늘 —"
-            lines.append(h.name)
-            lines.append(f"  {shares}주 / {cost_str} / {pp_str} / ({today_str})")
+            lines.append(f"{h.name}({shares}주/{cost_str})")
+            lines.append(f": {pp_str}({today_str})")
 
     return "\n".join(lines)
 
