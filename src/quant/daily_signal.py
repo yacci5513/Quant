@@ -20,7 +20,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import Enum
 
@@ -36,6 +36,40 @@ from quant.strategies.momentum_topn import MomentumTopNConfig, generate_weights
 
 # 단일 종목 최대 노출 (시드 대비 비율) — 1주 가격이 이걸 초과하면 매수 차단
 _MAX_POSITION_PCT = 0.20
+# 시드 부족 종목을 자동 대체하기 위한 spare 종목 수 (Top-N+spare 후보 풀)
+_SPARE_TOP_N = 5
+
+
+def _select_buyable_topn(
+    weights_row: pd.Series,
+    last_close: pd.Series,
+    seed_won: float | None,
+    target_n: int,
+) -> pd.Series:
+    """가중치 row → 매수 가능한 상위 target_n 종목만 균등 가중치로 재구성.
+
+    1주 가격이 시드 × MAX_POSITION_PCT 초과 (시드 부족) 종목 자동 제외.
+    남은 종목 중 원래 가중치 큰 순 target_n까지 선정 → 각 1/target_n 균등.
+    """
+    if seed_won is None or seed_won <= 0:
+        return weights_row
+    candidates = weights_row[weights_row > 0].sort_values(ascending=False)
+    buyable: list[str] = []
+    threshold = seed_won * _MAX_POSITION_PCT
+    for ticker in candidates.index:
+        close = float(last_close.get(ticker, float("nan")))
+        if close > 0 and close <= threshold:
+            buyable.append(ticker)
+        if len(buyable) >= target_n:
+            break
+    if not buyable:
+        return weights_row * 0.0  # 매수 가능 종목 0 → 전부 비중 0
+    w = 1.0 / len(buyable)
+    result = pd.Series(0.0, index=weights_row.index)
+    for ticker in buyable:
+        result[ticker] = w
+    return result
+
 
 # 챔피언 정책 #6 — 강세에 모멘텀, 약세엔 저변동성, 변동성 큰 강세엔 60/40
 CHAMPION_POLICY_B = RegimePolicy(
@@ -260,8 +294,9 @@ def compute_daily_signal(
         exposure = (weights.sum(axis=1) > 1e-6).astype(float)
         base_weights = weights  # 청산 메시지 시 보유 종목 = 현재
     else:
-        # 단일 챔피언 (이전 default)
-        base_weights = generate_weights(prices, values=values, config=cfg)
+        # 단일 챔피언 — Top-(N+spare)로 확장해서 시드 부족 종목 자동 대체 (cur_holdings 단계)
+        cfg_spare = replace(cfg, top_n=cfg.top_n + _SPARE_TOP_N)
+        base_weights = generate_weights(prices, values=values, config=cfg_spare)
         weights, exposure = filter_weights(
             prices, base_weights, mode=RegimeMode.BINARY, ma_window=ma_window
         )
@@ -405,7 +440,9 @@ def compute_daily_signal(
 
     # 리밸런싱 판정 — 실잔고 vs 시그널 목표 차이 (가중치 변경 자체 X)
     # multi_regime=true에서 매일 weights가 미세하게 바뀌는 노이즈를 무시하기 위함
-    cur_holdings = weights.loc[last_rb_date]
+    cur_holdings_raw = weights.loc[last_rb_date]
+    # 시드 부족 종목 자동 대체 — Top-(N+spare) 중 매수 가능 상위 N 선정 + 균등 가중
+    cur_holdings = _select_buyable_topn(cur_holdings_raw, last_close, seed_won, cfg.top_n)
     # 시그널 종목 중 매수 가능한 것만 (target_shares > 0)
     target_rows = _to_holding_rows(
         cur_holdings, last_close, name_map, seed_won, prices, balance_map
