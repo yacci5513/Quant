@@ -1227,14 +1227,26 @@ def render_hourly_balance(hb: HourlyBalance) -> str:
     if not hb.holdings:
         lines.append("보유 종목 없음")
     else:
-        for h in sorted(hb.holdings, key=lambda x: -(x.profit_pct or 0)):
+
+        def _pct_icon(v: float | None) -> str:
+            if v is None:
+                return ""
+            if v > 0:
+                return "🔵"
+            if v < 0:
+                return "🔴"
+            return "⚪"
+
+        for i, h in enumerate(sorted(hb.holdings, key=lambda x: -(x.profit_pct or 0)), 1):
             shares = h.actual_shares or 0
             cost_won = (h.avg_price or 0) * shares
             cost_str = f"매입 {cost_won / 10000:,.1f}만"
+            pp_icon = _pct_icon(h.profit_pct)
             pp_str = f"{h.profit_pct:+.1f}%" if h.profit_pct is not None else "—"
+            today_icon = _pct_icon(h.ret_1d)
             today_str = f"오늘 {h.ret_1d * 100:+.2f}%" if h.ret_1d is not None else "오늘 —"
-            lines.append(f"{h.name}({shares}주/{cost_str})")
-            lines.append(f": {pp_str}({today_str})")
+            lines.append(f"{i}.{h.name}({shares}주/{cost_str})")
+            lines.append(f": {pp_icon}{pp_str}({today_icon}{today_str})")
 
     return "\n".join(lines)
 
