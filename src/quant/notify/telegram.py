@@ -48,14 +48,21 @@ def _split_long(text: str, max_len: int = _MAX_LEN) -> list[str]:
     return chunks
 
 
+def _html_escape(text: str) -> str:
+    """텔레그램 HTML 파스 모드 — &, <, > 만 이스케이프."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
-def _send_one(token: str, chat_id: str, text: str) -> None:
+def _send_one(token: str, chat_id: str, text: str, parse_mode: str | None = None) -> None:
     url = f"{_API_BASE}/bot{token}/sendMessage"
-    payload = {
+    payload: dict[str, object] = {
         "chat_id": chat_id,
         "text": text,
         "disable_web_page_preview": True,
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     with httpx.Client(timeout=_DEFAULT_TIMEOUT) as client:
         resp = client.post(url, json=payload)
         if resp.status_code != 200:
@@ -71,6 +78,7 @@ def send_telegram(
     token: str | None = None,
     chat_id: str | None = None,
     silent_if_unconfigured: bool = True,
+    monospace: bool = False,
 ) -> bool:
     """메시지 전송. 토큰 미설정 시 silent skip (silent_if_unconfigured=True).
 
@@ -88,10 +96,17 @@ def send_telegram(
             return False
         raise ValueError("TELEGRAM_BOT_TOKEN 또는 TELEGRAM_CHAT_ID 비어있음")
 
-    chunks = _split_long(text)
-    for chunk in chunks:
-        _send_one(token, chat_id, chunk)
-    logger.info(f"Telegram 발송: {len(chunks)}건 chunk, {len(text)}자")
+    # monospace=True면 <pre> 블록으로 감싸 종목명·숫자 정렬 보존 (텔레그램 HTML 파스)
+    if monospace:
+        chunks = _split_long(text, max_len=_MAX_LEN - 16)
+        chunks = [f"<pre>{_html_escape(c)}</pre>" for c in chunks]
+        for chunk in chunks:
+            _send_one(token, chat_id, chunk, parse_mode="HTML")
+    else:
+        chunks = _split_long(text)
+        for chunk in chunks:
+            _send_one(token, chat_id, chunk)
+    logger.info(f"Telegram 발송: {len(chunks)}건 chunk, {len(text)}자 monospace={monospace}")
     return True
 
 

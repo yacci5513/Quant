@@ -27,8 +27,8 @@ LOG_FILE="$LOG_DIR/evening-$(date +%Y-%m-%d).log"
     docker compose run --rm app quant data fetch-krx --years 1 2>&1 || \
         echo "⚠️ fetch-krx 실패 (계속 진행)"
     echo
-    echo "[2/2] 잔고 + 손익 텔레그램 알림"
-    docker compose run --rm app quant signal --daily --telegram 2>&1
+    echo "[2/2] 듀얼 잔고 + 손익 텔레그램 알림"
+    docker compose run --rm app quant signal --dual --telegram 2>&1
     echo
     echo "Done: $(date -Iseconds)"
 } >> "$LOG_FILE" 2>&1

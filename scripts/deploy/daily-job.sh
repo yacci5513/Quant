@@ -43,11 +43,11 @@ fi
         echo "⚠️ fetch-krx failed (continuing)"
 } >> "$LOG_FILE" 2>&1
 
-# 2. 매일 알림 + 텔레그램
+# 2. 매일 알림 + 텔레그램 (듀얼 포트폴리오: 챔피언 70 + 어그 30)
 {
     echo
-    echo "[2/2] Daily signal + telegram..."
-    docker compose run --rm app quant signal --daily --telegram 2>&1
+    echo "[2/2] Dual signal + telegram..."
+    docker compose run --rm app quant signal --dual --telegram 2>&1
 } >> "$LOG_FILE" 2>&1
 
 echo "Daily job done: $(date -Iseconds)" >> "$LOG_FILE"

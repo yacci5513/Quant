@@ -1,16 +1,16 @@
-"""시그널 → KIS API 자동 매매 실행.
+"""시그널 → KIS API 자동 매매 실행 (듀얼 포트폴리오).
 
 흐름:
-1. 챔피언 시그널 계산 (월간 모멘텀+MA100)
-2. 현재 KIS 잔고 조회
-3. 차이 계산 (매도/매수)
+1. 듀얼 시그널 계산 (챔피언 70% + 어그레시브 30%)
+2. 현재 KIS 잔고 조회 (시그널 계산에 주입 → 중복 호출 회피)
+3. 통합 매도/매수 액션 추출 (combined_sells / combined_buys)
 4. KIS API로 주문
-5. 텔레그램 결과 발송
+5. 텔레그램 결과 발송 (compact 듀얼 알림 + 주문 결과)
 
 가드레일 강제:
 §3 미래참조: signal 생성 시 자동 보호 (engine.auto_shift_weights)
-§9 Kill switch: pre_trade_check 통과 못 하면 차단
-§10 라이브 진입 룰: SEED_WON 미설정 시 차단
+§9 Kill switch: 포트 누적 손익률 ≤ KILL_SWITCH_PCT 시 전량 매도
+§10 라이브 진입 룰: SEED_WON 미설정 시 차단 + 시드 분할로 가중 MDD 제어
 """
 
 from __future__ import annotations
@@ -27,7 +27,12 @@ from quant.backtest.risk import (
 )
 from quant.common.config import get_settings
 from quant.common.logger import logger
-from quant.daily_signal import AlertType, compute_daily_signal
+from quant.daily_signal import (
+    AlertType,
+    DualSignalConfig,
+    compute_dual_signal,
+    render_dual_alert,
+)
 from quant.live.client import (
     KISError,
     OrderResult,
@@ -36,6 +41,8 @@ from quant.live.client import (
     order_cash,
     round_to_tick,
 )
+from quant.live.killswitch import evaluate as eval_killswitch
+from quant.live.killswitch import save_state as save_kill_state
 from quant.live.trailing import (
     check_trail_trigger,
     load_trailing,
@@ -49,11 +56,13 @@ from quant.notify.telegram import send_telegram
 BUY_LIMIT_PREMIUM = 0.005  # +0.5%
 
 # 종목별 손절·익절 한도 (KIS 평가손익률 기준, %)
-STOP_LOSS_PCT = -10.0  # -10% 도달 시 손절
-TAKE_PROFIT_PCT = 20.0  # +20% 도달 시 익절
+# 2026-05-18: -10/+20 → -15/+40 완화 (시장 강세 시 알파 죽이는 문제 + 단발 노이즈 손절 회피)
+STOP_LOSS_PCT = -15.0  # -15% 도달 시 손절
+TAKE_PROFIT_PCT = 40.0  # +40% 도달 시 익절 (추세 가드 +5%로 더 보류 가능)
 
-# 포트폴리오 누적 손실 Kill switch (%)
-KILL_SWITCH_PCT = -15.0
+# 포트폴리오 누적 손실 Kill switch (%) — 2일 연속 위반 시 발동, 손실 종목만 매도
+# (단발 노이즈로 +20% 종목까지 던지는 문제 해결, 2026-05-17)
+KILL_SWITCH_PCT = -20.0
 
 # 당일 추세 가드 (당일 변동률 %)
 # 손절 조건이지만 당일 +TREND_GUARD_STOP% 이상 회복 → 손절 보류
@@ -81,38 +90,71 @@ def _check_seed() -> int:
     return s.seed_won
 
 
+def _derive_overall_alert(dual) -> AlertType:
+    """듀얼 시그널에서 통합 알림 타입 추론.
+
+    LIQUIDATE: 양쪽 모두 LIQUIDATE (시장 약세 진입)
+    REBALANCE: 통합 매매 액션이 1개 이상 존재
+    RECOVER  : 둘 중 하나라도 RECOVER (다른 쪽은 NORMAL)
+    NORMAL   : 그 외 (보유 유지)
+    """
+    c, a = dual.champion.alert_type, dual.aggressive.alert_type
+    if c is AlertType.LIQUIDATE and a is AlertType.LIQUIDATE:
+        return AlertType.LIQUIDATE
+    if dual.combined_sells or dual.combined_buys:
+        return AlertType.REBALANCE
+    if AlertType.RECOVER in (c, a):
+        return AlertType.RECOVER
+    return AlertType.NORMAL
+
+
 def execute_rebalance(
     *,
     dry_run: bool = True,
     seed_override: int | None = None,
     notify: bool = True,
+    aggressive_pct: float = 0.30,
 ) -> ExecutionResult:
-    """챔피언 시그널 기반 자동 리밸런싱.
+    """듀얼 시그널 기반 자동 리밸런싱.
+
+    챔피언(월간 12m+MA100, 70%) + 어그레시브(주간 1m Top-5+MA100, 30%)
+    두 시그널 합집합 - 잔고 = 통합 매도/매수 액션.
 
     Args:
         dry_run: True면 주문 실제 호출 X (시뮬레이션, 메시지만 발송)
         seed_override: 시드 강제 지정 (None이면 settings.seed_won)
         notify: 텔레그램 발송 여부
+        aggressive_pct: 어그레시브 시드 비중 (0.0~1.0, 기본 0.30)
     """
     seed = seed_override if seed_override is not None else _check_seed()
     s = get_settings()
 
-    # 1. 현재 보유 먼저 조회 → 시그널에 매입가/손익 주입 (텔레그램 알림용)
+    # 1. 현재 보유 먼저 조회 → 시그널에 매입가/손익 주입 (잔고 fetch 1회)
     holdings = get_balance()
     held_map = {h.ticker: h for h in holdings}
 
-    # 2. 챔피언 시그널 — .env의 multi_regime 설정 반영
-    signal = compute_daily_signal(
+    # 2. 듀얼 시그널 계산
+    dual_cfg = DualSignalConfig(
+        champion_pct=1.0 - aggressive_pct,
+        aggressive_pct=aggressive_pct,
+    )
+    dual = compute_dual_signal(
         seed_won=float(seed),
-        multi_regime=s.strategy_multi_regime,
+        dual_config=dual_cfg,
+        fetch_balance=False,
         balance_map=held_map,
     )
+    notes_combined = list(dual.champion.notes) + list(dual.aggressive.notes)
 
     sells_orders: list[OrderResult] = []
     buys_orders: list[OrderResult] = []
     skipped: list[str] = []
-    notes: list[str] = list(signal.notes)
-    notes.append(f"모드: {s.kis_mode.value} / 시드: {seed:,}원 / dry_run: {dry_run}")
+    notes: list[str] = notes_combined
+    notes.append(
+        f"모드: {s.kis_mode.value} / 시드: {seed:,}원 "
+        f"(챔피언 {int(dual_cfg.champion_pct * 100)}% / 어그 {int(dual_cfg.aggressive_pct * 100)}%) "
+        f"/ dry_run: {dry_run}"
+    )
 
     def _dry_order(ticker: str, qty: int, side: str, est_price: float | None) -> OrderResult:
         """dry-run 가짜 OrderResult — render에서 그대로 종목명·가격 표시 가능."""
@@ -156,11 +198,28 @@ def execute_rebalance(
             except _OrderExc as e:
                 skipped.append(f"매도 실패 {ticker}: {e}")
 
-    # 2a. 포트폴리오 Kill switch — 누적 손익률 < KILL_SWITCH_PCT면 전량 매도
-    port_pp = signal.balance_total_profit_pct
-    if port_pp is not None and port_pp <= KILL_SWITCH_PCT:
-        notes.append(f"🚨 Kill switch — 포트 누적 {port_pp:+.2f}% ≤ {KILL_SWITCH_PCT}%, 전량 매도")
-        _sell_all({h.ticker: f"Kill switch {h.ticker} {h.profit_pct:+.1f}%" for h in holdings})
+    # 2a. 포트폴리오 Kill switch — 2일 연속 임계 위반 시 발동, 손실 종목만 매도
+    port_pp = dual.balance_total_profit_pct
+    from datetime import date as _date
+
+    decision, new_kill_state = eval_killswitch(_date.today(), port_pp, threshold=KILL_SWITCH_PCT)
+    save_kill_state(new_kill_state)
+    if decision.armed and not decision.should_fire:
+        notes.append(decision.reason)  # 1일째 armed — 알림만, 매도 X
+    if decision.should_fire:
+        # 손실 종목(profit_pct < 0)만 매도. 이익 종목은 보존.
+        losers = {
+            h.ticker: f"Kill switch {h.ticker} {h.profit_pct:+.1f}%"
+            for h in holdings
+            if h.profit_pct is not None and h.profit_pct < 0
+        }
+        keepers = [h for h in holdings if h.profit_pct is not None and h.profit_pct >= 0]
+        notes.append(decision.reason)
+        notes.append(
+            f"손실 종목 {len(losers)}건만 매도 (이익 종목 {len(keepers)}건 보존: "
+            f"{', '.join(h.ticker for h in keepers[:5])}{'...' if len(keepers) > 5 else ''})"
+        )
+        _sell_all(losers)
         if notify:
             msg = render_execution_result(
                 ExecutionResult(sells=sells_orders, buys=buys_orders, skipped=skipped, notes=notes),
@@ -168,7 +227,7 @@ def execute_rebalance(
                 dry_run=dry_run,
             )
             try:
-                send_telegram(msg)
+                send_telegram(msg, monospace=True)
             except Exception as e:
                 logger.warning(f"텔레그램 발송 실패: {e}")
         return ExecutionResult(sells=sells_orders, buys=buys_orders, skipped=skipped, notes=notes)
@@ -231,68 +290,57 @@ def execute_rebalance(
     except Exception as e:
         logger.warning(f"trailing.json 저장 실패: {e}")
 
-    # 2c. 시그널 처리 (LIQUIDATE / NORMAL / REBALANCE)
-    if signal.alert_type is AlertType.LIQUIDATE:
-        notes.append("청산 신호 — 모든 보유 시장가 매도")
-        for h in holdings:
-            if dry_run:
-                sells_orders.append(_dry_order(h.ticker, h.quantity, "sell", h.current_price))
-                continue
-            try:
-                r = order_cash(ticker=h.ticker, quantity=h.quantity, side="sell", price=None)
-                sells_orders.append(r)
-            except _OrderExc as e:
-                skipped.append(f"매도 실패 {h.ticker}: {e}")
+    # 2c. 듀얼 통합 매매 액션 — combined_sells / combined_buys 직접 사용
+    # LIQUIDATE 시 해당 시그널 holdings=[] → 자연스럽게 combined_sells에 흡수됨
+    # NORMAL이면 combined_sells/buys 모두 빈 리스트
+    sell_tickers = {h.ticker for h in dual.combined_sells}
+    for ticker in sell_tickers - forced_sells:
+        h = held_map.get(ticker)
+        if not h:
+            continue
+        if dry_run:
+            sells_orders.append(_dry_order(ticker, h.quantity, "sell", h.current_price))
+            continue
+        try:
+            r = order_cash(ticker=ticker, quantity=h.quantity, side="sell", price=None)
+            sells_orders.append(r)
+        except _OrderExc as e:
+            skipped.append(f"매도 실패 {ticker}: {e}")
 
-    elif signal.alert_type in {AlertType.NORMAL, AlertType.REBALANCE}:
-        # 시그널 보유 종목 vs 실제 보유 차이 (단 손절·익절로 이미 매도된 종목은 제외)
-        target_tickers = {h.ticker: h for h in signal.holdings if h.target_shares}
-        target_set = set(target_tickers.keys())
-        actual_set = set(held_map.keys()) - forced_sells
+    # 매수: combined_buys (지정가 = 어제 종가 × (1 + BUY_LIMIT_PREMIUM), 호가 단위 라운드)
+    for buy in dual.combined_buys:
+        if not buy.target_shares or buy.target_shares <= 0:
+            continue
+        if buy.ticker in forced_sells:
+            continue  # 손절·익절로 매도된 종목은 같은 날 재매수 안 함
+        actual_qty = held_map.get(buy.ticker)
+        need = buy.target_shares - (actual_qty.quantity if actual_qty else 0)
+        if need <= 0:
+            continue
+        limit_price = None
+        if buy.last_close:
+            limit_price = round_to_tick(buy.last_close * (1 + BUY_LIMIT_PREMIUM))
+        if dry_run:
+            buys_orders.append(_dry_order(buy.ticker, need, "buy", limit_price))
+            continue
+        try:
+            r = order_cash(ticker=buy.ticker, quantity=need, side="buy", price=limit_price)
+            buys_orders.append(r)
+        except _OrderExc as e:
+            skipped.append(f"매수 실패 {buy.ticker}: {e}")
 
-        # 매도: 실제 보유 - 시그널 보유
-        for ticker in actual_set - target_set:
-            h = held_map[ticker]
-            if dry_run:
-                sells_orders.append(_dry_order(ticker, h.quantity, "sell", h.current_price))
-                continue
-            try:
-                r = order_cash(ticker=ticker, quantity=h.quantity, side="sell", price=None)
-                sells_orders.append(r)
-            except _OrderExc as e:
-                skipped.append(f"매도 실패 {ticker}: {e}")
-
-        # 매수: 시그널 보유 - 실제 보유 + 부족분 (손절된 종목은 같은 날 재매수 X)
-        # 지정가 = 어제 종가 × (1 + BUY_LIMIT_PREMIUM), 호가 단위 라운드
-        # 슬리피지 방지. 단 가격 급등 시 미체결 가능 (다음날 09:30 재시도)
-        for ticker in target_tickers:
-            if ticker in forced_sells:
-                continue  # 손절·익절로 매도된 종목은 같은 날 재매수 안 함
-            target = target_tickers[ticker]
-            actual_qty = held_map.get(ticker)
-            need = target.target_shares - (actual_qty.quantity if actual_qty else 0)
-            if need <= 0:
-                continue
-            limit_price = None
-            if target.last_close:
-                limit_price = round_to_tick(target.last_close * (1 + BUY_LIMIT_PREMIUM))
-            if dry_run:
-                buys_orders.append(_dry_order(ticker, need, "buy", limit_price))
-                continue
-            try:
-                r = order_cash(ticker=ticker, quantity=need, side="buy", price=limit_price)
-                buys_orders.append(r)
-            except _OrderExc as e:
-                skipped.append(f"매수 실패 {ticker}: {e}")
-
+    # 알림: 듀얼 시그널 본문(시장·잔고·전략별·매매상세) + 실행 결과 요약 추가
     if notify:
-        msg = render_execution_result(
+        derived_type = _derive_overall_alert(dual)
+        dual_text = render_dual_alert(dual)
+        exec_text = render_execution_result(
             ExecutionResult(sells=sells_orders, buys=buys_orders, skipped=skipped, notes=notes),
-            signal_type=signal.alert_type,
+            signal_type=derived_type,
             dry_run=dry_run,
         )
+        msg = dual_text + "\n\n" + exec_text
         try:
-            send_telegram(msg)
+            send_telegram(msg, monospace=True)
         except Exception as e:
             logger.warning(f"텔레그램 발송 실패: {e}")
 

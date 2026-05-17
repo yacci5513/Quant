@@ -689,3 +689,477 @@ def render_alert(signal: DailySignal) -> str:
         lines.append(f"🔔 다음 매매: {s.next_rebalance} ({days}일 후)")
 
     return "\n".join(lines)
+
+
+# ============================================================================
+# Dual Portfolio (챔피언 + 어그레시브 D) — Compact 알림
+# ============================================================================
+
+
+@dataclass
+class DualSignalConfig:
+    """이중 포트폴리오 설정 — 챔피언(안정) + 어그레시브(D 시나리오)."""
+
+    champion_pct: float = 0.70
+    aggressive_pct: float = 0.30
+    # 챔피언: 월간 12m Top-10 + MA100 — walk-forward §10 통과 (Sharpe 1.34, MDD -23.5%)
+    champion_top_n: int = 10
+    champion_lookback: int = 12
+    champion_skip: int = 1
+    champion_freq: str = "BMS"
+    # 어그레시브: 주간 1m Top-5 + MA100 — walk-forward Sharpe 2.69, MDD -32% (§10 위반, 시드 일부만)
+    aggressive_top_n: int = 5
+    aggressive_lookback: int = 1
+    aggressive_skip: int = 0
+    aggressive_freq: str = "W-FRI"
+    ma_window: int = 100
+
+
+@dataclass
+class DualSignal:
+    """챔피언 + 어그레시브 통합 시그널.
+
+    두 전략 시그널 합집합으로 통합 매도/매수 액션 산출.
+    KIS 잔고는 1계좌이므로 어느 종목이 어느 전략인지 추적 불가 →
+    "시그널 권고 합집합 - 잔고 = 매수 / 잔고 - 합집합 = 매도" 단순화.
+    """
+
+    as_of: date
+    market_state: dict
+    champion: DailySignal
+    aggressive: DailySignal
+    dual_config: DualSignalConfig
+    combined_sells: list[HoldingRow] = field(default_factory=list)
+    combined_buys: list[HoldingRow] = field(default_factory=list)
+    balance_total_eval: float | None = None
+    balance_total_cost: float | None = None
+    balance_total_profit: float | None = None
+    balance_total_profit_pct: float | None = None
+    balance_change_1d_won: float | None = None
+    balance_change_1d_pct: float | None = None
+    has_balance: bool = False
+
+
+def compute_dual_signal(
+    *,
+    seed_won: float | None = None,
+    dual_config: DualSignalConfig | None = None,
+    prices: pd.DataFrame | None = None,
+    values: pd.DataFrame | None = None,
+    fetch_balance: bool = True,
+    balance_map: dict | None = None,
+) -> DualSignal:
+    """챔피언 + 어그레시브 두 시그널 동시 계산.
+
+    시드는 champion_pct / aggressive_pct로 분할. 각 전략은 자기 시드 안에서
+    매수 가능 종목을 선정. KIS 잔고는 통합 — 어느 종목이 어느 전략인지는
+    시그널 매핑으로 추적 (알림에 표시).
+
+    balance_map: 외부에서 fetch한 잔고를 주입하면 중복 호출 회피 (execute.py 등).
+    """
+    cfg = dual_config or DualSignalConfig()
+    if prices is None:
+        prices = load_close_panel()
+    if values is None:
+        values = load_value_panel()
+    if prices.empty:
+        raise RuntimeError("저장된 가격 데이터 없음 — quant data fetch-krx 먼저 실행")
+
+    if balance_map is None and fetch_balance:
+        balance_map = _fetch_balance_safe()
+
+    champion_cfg = MomentumTopNConfig(
+        top_n=cfg.champion_top_n,
+        lookback_months=cfg.champion_lookback,
+        skip_months=cfg.champion_skip,
+        rebalance_freq=cfg.champion_freq,
+    )
+    champ_seed = seed_won * cfg.champion_pct if seed_won else None
+    champion = compute_daily_signal(
+        seed_won=champ_seed,
+        prices=prices,
+        values=values,
+        config=champion_cfg,
+        ma_window=cfg.ma_window,
+        multi_regime=False,
+        fetch_balance=False,
+        balance_map=balance_map,
+    )
+
+    aggressive_cfg = MomentumTopNConfig(
+        top_n=cfg.aggressive_top_n,
+        lookback_months=cfg.aggressive_lookback,
+        skip_months=cfg.aggressive_skip,
+        rebalance_freq=cfg.aggressive_freq,
+    )
+    agg_seed = seed_won * cfg.aggressive_pct if seed_won else None
+    aggressive = compute_daily_signal(
+        seed_won=agg_seed,
+        prices=prices,
+        values=values,
+        config=aggressive_cfg,
+        ma_window=cfg.ma_window,
+        multi_regime=False,
+        fetch_balance=False,
+        balance_map=balance_map,
+    )
+
+    # ----- 통합 매도/매수 액션 (매매일 룰 적용) -----
+    # 챔피언은 매월 1일 (BMS), 어그는 매주 금 (W-FRI)만 매매.
+    # 비매매일에는 시그널 매도 비활성 — 보유 유지 (손절·익절·Kill switch만 별도 적용).
+    # 매수는 매매일에만 신규 진입 — 다음 매매일까지 시드 미달 인정.
+    today_ts = prices.index[-1]
+    champ_panel_full = generate_weights(prices, values=values, config=champion_cfg)
+    agg_panel_full = generate_weights(prices, values=values, config=aggressive_cfg)
+
+    def _is_rebalance_today(panel: pd.DataFrame) -> bool:
+        if len(panel) < 2 or today_ts not in panel.index:
+            return False
+        prev_idx = panel.index[panel.index < today_ts]
+        if len(prev_idx) == 0:
+            return False
+        diff = (panel.loc[today_ts] - panel.loc[prev_idx[-1]]).abs().sum()
+        return float(diff) > 1e-6
+
+    champ_is_rb = _is_rebalance_today(champ_panel_full)
+    agg_is_rb = _is_rebalance_today(agg_panel_full)
+
+    champ_targets = {h.ticker for h in champion.holdings if h.target_shares and h.target_shares > 0}
+    agg_targets = {h.ticker for h in aggressive.holdings if h.target_shares and h.target_shares > 0}
+    actual_set = {h.ticker for h in champion.actual_holdings}
+
+    # 매도: 매매일에만 활성. 단 다른 전략이 권고하는 종목은 보호.
+    sells_tickers: set[str] = set()
+    if champ_is_rb:
+        sells_tickers |= actual_set - champ_targets - agg_targets
+    # 어그 매매일에만 정리하면 챔피언 시드 종목까지 침범 우려 → 어그 매매일 시그널 매도는 비활성
+    # (어그 종목 누적 정리는 후속: state 기반 추적 필요)
+    combined_sells = [h for h in champion.actual_holdings if h.ticker in sells_tickers]
+
+    # 매수: 각 전략 매매일에만 활성. 시드 미달 자동 채움.
+    buys_candidates: list[HoldingRow] = []
+    if champ_is_rb:
+        for h in champion.holdings:
+            if h.ticker not in actual_set:
+                buys_candidates.append(h)
+    if agg_is_rb:
+        for h in aggressive.holdings:
+            if h.ticker not in actual_set:
+                buys_candidates.append(h)
+
+    # 중복 제거 + 보통주/우선주 동시 매수 금지
+    held_after_sell = actual_set - {h.ticker for h in combined_sells}
+    seen_roots: set[str] = {t[:5] for t in held_after_sell if len(t) >= 5}
+    seen_tickers: set[str] = set()
+    combined_buys: list[HoldingRow] = []
+    for h in buys_candidates:
+        if h.ticker in seen_tickers:
+            continue
+        root = h.ticker[:5] if len(h.ticker) >= 5 else h.ticker
+        if root in seen_roots:
+            continue
+        combined_buys.append(h)
+        seen_tickers.add(h.ticker)
+        seen_roots.add(root)
+
+    # 보통주/우선주 동시 매수 금지 — 종목코드 첫 5자리(prefix)가 같으면 같은 회사
+    # 예) 006800 미래에셋증권 + 00680K 미래에셋증권2우B → 1개만 보유
+    held_after_sell = actual_set - {h.ticker for h in combined_sells}
+    seen_roots: set[str] = {t[:5] for t in held_after_sell if len(t) >= 5}
+    deduped_buys: list[HoldingRow] = []
+    for h in combined_buys:
+        root = h.ticker[:5] if len(h.ticker) >= 5 else h.ticker
+        if root in seen_roots:
+            continue  # 같은 회사 종목 이미 보유 또는 다른 매수에 포함
+        deduped_buys.append(h)
+        seen_roots.add(root)
+    combined_buys = deduped_buys
+
+    return DualSignal(
+        as_of=champion.as_of,
+        market_state=champion.market_state,
+        champion=champion,
+        aggressive=aggressive,
+        dual_config=cfg,
+        combined_sells=combined_sells,
+        combined_buys=combined_buys,
+        balance_total_eval=champion.balance_total_eval,
+        balance_total_cost=champion.balance_total_cost,
+        balance_total_profit=champion.balance_total_profit,
+        balance_total_profit_pct=champion.balance_total_profit_pct,
+        balance_change_1d_won=champion.balance_change_1d_won,
+        balance_change_1d_pct=champion.balance_change_1d_pct,
+        has_balance=champion.has_balance,
+    )
+
+
+# ============================================================================
+# Compact 렌더 — 이모지 최소, 섹션 구분선, 행동 상단, 포맷 일관
+# ============================================================================
+
+_SEP = "━━━━━━━━━━━━━━━━━━━━━"
+
+
+def _hdr(title: str) -> str:
+    return f"━━━ {title} ━━━"
+
+
+def _fmt_won_compact(v: float | None) -> str:
+    if v is None:
+        return "—"
+    return f"{v / 10000:,.1f}만"
+
+
+def _fmt_signed_won(v: float | None) -> str:
+    if v is None:
+        return "—"
+    sign = "+" if v >= 0 else "−"
+    return f"{sign}{abs(v) / 10000:,.0f}만"
+
+
+def _holding_line(h: HoldingRow) -> str:
+    """종목 1줄 — 이름 N주  +X.X% (+8만). 단일 포맷."""
+    shares = h.actual_shares if h.actual_shares is not None else (h.target_shares or 0)
+    name = h.name[:10]
+    if h.profit_pct is not None:
+        pct_str = f"{h.profit_pct:+5.1f}%"
+        money_str = f" ({_fmt_signed_won(h.profit)})" if h.profit is not None else ""
+    elif h.ret_1d is not None:
+        pct_str = f"{h.ret_1d * 100:+5.1f}%"
+        money_str = ""
+    else:
+        pct_str = "  —  "
+        money_str = ""
+    return f"  {name:<10} {shares:>4}주  {pct_str}{money_str}"
+
+
+def _buy_line(h: HoldingRow) -> str:
+    """매수 종목 1줄 — 이름 N주 (X만)."""
+    name = h.name[:10]
+    shares = h.target_shares or 0
+    val = h.target_value_won
+    val_str = f" ({val / 10000:,.0f}만)" if val else ""
+    return f"  · 매수 {name:<10} {shares:>4}주{val_str}"
+
+
+def _sell_line(h: HoldingRow) -> str:
+    """매도 종목 1줄 — 이름 N주 (+X.X%)."""
+    name = h.name[:10]
+    shares = h.actual_shares or h.target_shares or 0
+    pct = f" ({h.profit_pct:+.1f}%)" if h.profit_pct is not None else ""
+    return f"  · 매도 {name:<10} {shares:>4}주{pct}"
+
+
+def _render_strategy_section(
+    name: str,
+    pct: int,
+    desc: str,
+    sig: DailySignal,
+    warn: str | None = None,
+) -> list[str]:
+    """전략 1개 섹션 — 시그널 권고 + 매칭 잔고만 표시 (매매 액션은 통합 섹션에서).
+
+    종목 리스트:
+      · 보유 중: 종목명 N주 +X.X% (+/-N만)
+      · 신규 권고: 종목명 N주 (X만) 신규
+      · 시드 부족: 종목명 1주 X만 (시드 부족)
+    """
+    out = ["", _hdr(f"{name} {pct}%")]
+    desc_line = desc + (f"  ({warn})" if warn else "")
+    out.append(desc_line)
+
+    actual_map = {h.ticker: h for h in sig.actual_holdings}
+    matched = [h for h in sig.holdings if h.ticker in actual_map]
+    eval_sum = sum((actual_map[h.ticker].eval_amount or 0) for h in matched)
+    cost_sum = sum(
+        (actual_map[h.ticker].avg_price or 0) * (actual_map[h.ticker].actual_shares or 0)
+        for h in matched
+    )
+    prof_pct = ((eval_sum - cost_sum) / cost_sum * 100) if cost_sum > 0 else None
+
+    if matched:
+        prof_str = f" ({prof_pct:+.1f}%)" if prof_pct is not None else ""
+        out.append(
+            f"평가 {_fmt_won_compact(eval_sum)}{prof_str} | "
+            f"매칭 {len(matched)}/{len(sig.holdings)}종목"
+        )
+    else:
+        out.append(f"시그널 권고 {len(sig.holdings)}종목 (현재 보유 0)")
+
+    out.append("")
+    for h in sig.holdings[:10]:
+        if h.ticker in actual_map:
+            out.append(_holding_line(actual_map[h.ticker]))
+        else:
+            name_str = h.name[:10]
+            shares = h.target_shares or 0
+            if shares > 0 and h.target_value_won:
+                out.append(
+                    f"  {name_str:<10} {shares:>4}주  ({h.target_value_won / 10000:,.0f}만) 신규"
+                )
+            elif h.last_close:
+                price_man = h.last_close / 10000
+                out.append(f"  {name_str:<10}    —  ({price_man:,.0f}만/주, 시드 부족)")
+            else:
+                out.append(f"  {name_str:<10}    —  신규")
+
+    rb = sig.next_rebalance
+    if rb:
+        days = (rb - sig.as_of).days
+        out.append("")
+        out.append(f"다음 매매: {rb} ({days}일)")
+    return out
+
+
+def _render_top_actions(dual: DualSignal) -> list[str]:
+    """최상단 — 오늘 통합 매매 요약 1~2줄."""
+    out = [_hdr("오늘의 행동")]
+    n_sell = len(dual.combined_sells)
+    n_buy = len(dual.combined_buys)
+    if n_sell or n_buy:
+        out.append(f"통합 매매  매도 {n_sell} / 매수 {n_buy}  (09:30 자동)")
+    else:
+        out.append("보유 유지 (오늘 매매 없음)")
+
+    next_parts = []
+    if dual.champion.next_rebalance:
+        days_c = (dual.champion.next_rebalance - dual.as_of).days
+        next_parts.append(f"챔피언 {days_c}일")
+    if dual.aggressive.next_rebalance:
+        days_a = (dual.aggressive.next_rebalance - dual.as_of).days
+        next_parts.append(f"어그 {days_a}일")
+    if next_parts:
+        out.append("다음 매매:  " + "  /  ".join(next_parts))
+    return out
+
+
+def _render_combined_actions(dual: DualSignal) -> list[str]:
+    """통합 매매 액션 — 매도/매수 종목 상세 (실행 가능 형태)."""
+    if not dual.combined_sells and not dual.combined_buys:
+        return []
+    out = [
+        "",
+        _hdr(f"매매 상세  매도 {len(dual.combined_sells)} / 매수 {len(dual.combined_buys)}"),
+    ]
+    if dual.combined_sells:
+        out.append("매도:")
+        for h in dual.combined_sells:
+            out.append(_sell_line(h))
+    if dual.combined_buys:
+        out.append("매수:")
+        for h in dual.combined_buys:
+            out.append(_buy_line(h))
+    return out
+
+
+def _render_market_section(market: dict, ma_window: int) -> list[str]:
+    pos = "위" if market["in_uptrend"] else "아래"
+    safety = "안전" if market["in_uptrend"] else "위험"
+    chg_1d = market.get("change_1d")
+    chg_5d = market.get("change_5d")
+    line2 = []
+    if chg_1d is not None:
+        line2.append(f"어제 {chg_1d * 100:+.1f}%")
+    if chg_5d is not None:
+        line2.append(f"5d {chg_5d * 100:+.1f}%")
+    return [
+        "",
+        _hdr("시장"),
+        f"KOSPI MA{ma_window} {pos} {market['distance_pct']:+.1f}% ({safety})",
+        " / ".join(line2) if line2 else "",
+    ]
+
+
+def _render_balance_section_compact(dual: DualSignal) -> list[str]:
+    if not dual.has_balance:
+        return ["", _hdr("통합 잔고"), "KIS 잔고 미연동 (시뮬레이션 모드)"]
+    eval_str = _fmt_won_compact(dual.balance_total_eval)
+    cost_str = _fmt_won_compact(dual.balance_total_cost)
+    today = ""
+    if dual.balance_change_1d_pct is not None:
+        today = f"오늘 {dual.balance_change_1d_pct:+.2f}%"
+        if dual.balance_change_1d_won is not None:
+            today += f" ({_fmt_signed_won(dual.balance_change_1d_won)})"
+    cum = ""
+    if dual.balance_total_profit_pct is not None:
+        cum = f"누적 {dual.balance_total_profit_pct:+.2f}%"
+        if dual.balance_total_profit is not None:
+            cum += f" ({_fmt_signed_won(dual.balance_total_profit)})"
+    parts = " / ".join(p for p in (today, cum) if p)
+    return [
+        "",
+        _hdr("통합 잔고"),
+        f"평가 {eval_str}원 (매입 {cost_str})",
+        parts,
+    ]
+
+
+def _render_extremes_section(dual: DualSignal) -> list[str]:
+    """전체 보유 종목 중 최고·최저 손익률 1줄씩."""
+    all_actual = list(
+        {
+            h.ticker: h for h in (dual.champion.actual_holdings + dual.aggressive.actual_holdings)
+        }.values()
+    )
+    valid = [h for h in all_actual if h.profit_pct is not None]
+    if len(valid) < 2:
+        return []
+    best = max(valid, key=lambda x: x.profit_pct)
+    worst = min(valid, key=lambda x: x.profit_pct)
+    return [
+        "",
+        _hdr("손익 종목"),
+        f"최고: {best.name} {best.profit_pct:+.1f}%",
+        f"최저: {worst.name} {worst.profit_pct:+.1f}%",
+    ]
+
+
+def render_dual_alert(dual: DualSignal) -> str:
+    """Compact 스타일 통합 알림.
+
+    1메시지 + 섹션 분리. 이모지 최소화. 행동 상단. 포맷 일관.
+    """
+    cfg = dual.dual_config
+    weekday = ("월", "화", "수", "목", "금", "토", "일")[dual.as_of.weekday()]
+    lines: list[str] = [f"{dual.as_of} ({weekday})"]
+
+    lines.extend(_render_top_actions(dual))
+    lines.extend(_render_market_section(dual.market_state, cfg.ma_window))
+    lines.extend(_render_balance_section_compact(dual))
+
+    champ_pct = int(cfg.champion_pct * 100)
+    lines.extend(
+        _render_strategy_section(
+            "챔피언",
+            champ_pct,
+            f"월간 {cfg.champion_lookback}m Top-{cfg.champion_top_n} + MA{cfg.ma_window}",
+            dual.champion,
+        )
+    )
+
+    agg_pct = int(cfg.aggressive_pct * 100)
+    lines.extend(
+        _render_strategy_section(
+            "어그레시브",
+            agg_pct,
+            f"주간 {cfg.aggressive_lookback}m Top-{cfg.aggressive_top_n} + MA{cfg.ma_window}",
+            dual.aggressive,
+            warn="MDD 높음",
+        )
+    )
+
+    lines.extend(_render_combined_actions(dual))
+    lines.extend(_render_extremes_section(dual))
+
+    # 빈 줄 정리 — 연속 빈 줄 1줄로 압축
+    out: list[str] = []
+    prev_empty = False
+    for line in lines:
+        if line.strip() == "":
+            if prev_empty:
+                continue
+            prev_empty = True
+        else:
+            prev_empty = False
+        out.append(line)
+    return "\n".join(out)

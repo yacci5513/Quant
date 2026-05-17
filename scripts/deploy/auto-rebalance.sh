@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# 매일 평일 10:30 KST — 자동 리밸런싱 (추세 가드용 1h 지연).
+# 매일 평일 10:30 KST — 듀얼 포트폴리오 자동 리밸런싱 (추세 가드용 1h 지연).
 #
 # 흐름:
 #   1. 데이터 fetch (전일 종가까지)
 #   2. quant live rebalance --execute
+#      - 듀얼: 챔피언 70% (월간 12m Top-10+MA100) + 어그 30% (주간 1m Top-5+MA100)
 #      - 종목별 -10% 손절 / +20% 익절 (당일 추세 가드 포함)
-#      - 포트 누적 -15% Kill switch (전량 매도)
-#      - 시그널 NORMAL이면 위 가드 외 KIS 발주 0건
-#      - REBALANCE/LIQUIDATE면 자동 매매
+#      - 포트 누적 -20% 2일 연속 위반 Kill switch (손실 종목만 매도, 이익 보존)
+#      - 시그널 통합 매도/매수 액션 없으면 KIS 발주 0건
 #
-# 시그널 결과는 execute_rebalance가 텔레그램으로 직접 발송.
+# 시그널 결과는 execute_rebalance가 텔레그램으로 직접 발송 (compact + monospace).
 #
 # cron (UTC):
 #   30 1 * * 1-5 = KST 10:30 월~금

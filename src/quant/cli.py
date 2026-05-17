@@ -247,6 +247,14 @@ def signal(
         "-d",
         help="매일 알림 모드 — 챔피언(월간 모멘텀+MA100) 기준 5가지 시나리오 자동 판별.",
     ),
+    dual: bool = typer.Option(
+        False,
+        "--dual",
+        help="이중 포트폴리오 — 챔피언 70% + 어그레시브(D 시나리오) 30% 통합 알림.",
+    ),
+    aggressive_pct: float = typer.Option(
+        0.30, "--agg-pct", help="이중 포트폴리오에서 어그레시브 비중 (0.0~1.0, 기본 0.30)"
+    ),
     ma_window: int = typer.Option(100, "--ma", help="시장 레짐 MA (100=챔피언, 200=보수)"),
     rebalance_freq: str = typer.Option("BMS", "--freq", help="리밸런싱: BMS|2W-FRI|BQS"),
     telegram: bool = typer.Option(
@@ -255,6 +263,38 @@ def signal(
 ) -> None:
     """현재 시점 시그널 — 오늘 매수해야 할 종목 또는 매일 알림 (--daily)."""
     from quant.strategies.momentum_topn import MomentumTopNConfig
+
+    if dual:
+        from quant.common.config import get_settings
+        from quant.daily_signal import (
+            DualSignalConfig,
+            compute_dual_signal,
+            render_dual_alert,
+        )
+
+        s = get_settings()
+        if seed is None:
+            env_seed = s.seed_won
+            seed = float(env_seed) if env_seed > 0 else None
+        if not 0.0 <= aggressive_pct <= 1.0:
+            raise typer.BadParameter("--agg-pct must be in [0.0, 1.0]")
+        dual_cfg = DualSignalConfig(
+            champion_pct=1.0 - aggressive_pct,
+            aggressive_pct=aggressive_pct,
+            ma_window=ma_window,
+        )
+        dsig = compute_dual_signal(seed_won=seed, dual_config=dual_cfg)
+        text = render_dual_alert(dsig)
+        typer.echo("\n" + text)
+        if telegram:
+            from quant.notify.telegram import send_telegram
+
+            sent = send_telegram(text, monospace=True)
+            if sent:
+                typer.echo("\n📲 텔레그램 발송 완료")
+            else:
+                typer.echo("\n⚠️ 텔레그램 미설정 — .env에 TELEGRAM_BOT_TOKEN/CHAT_ID 추가")
+        return
 
     if daily:
         from quant.common.config import get_settings
@@ -498,12 +538,19 @@ def live_rebalance(
     seed: int | None = typer.Option(
         None, "--seed", help="시드 강제 (미지정 시 .env SEED_WON 사용)"
     ),
+    aggressive_pct: float = typer.Option(
+        0.30, "--agg-pct", help="어그레시브 시드 비중 (0.0~1.0, 기본 0.30)"
+    ),
 ) -> None:
-    """챔피언 시그널 → KIS 자동 리밸런싱 (시뮬 기본, --execute로 실거래)."""
+    """듀얼 시그널(챔피언+어그레시브) → KIS 자동 리밸런싱 (시뮬 기본, --execute로 실거래)."""
     from quant.daily_signal import AlertType  # noqa
     from quant.live.execute import execute_rebalance
 
-    res = execute_rebalance(dry_run=dry_run, seed_override=seed, notify=True)
+    if not 0.0 <= aggressive_pct <= 1.0:
+        raise typer.BadParameter("--agg-pct must be in [0.0, 1.0]")
+    res = execute_rebalance(
+        dry_run=dry_run, seed_override=seed, notify=True, aggressive_pct=aggressive_pct
+    )
     typer.echo(f"매도: {len(res.sells)} / 매수: {len(res.buys)} / Skip: {len(res.skipped)}")
 
 
