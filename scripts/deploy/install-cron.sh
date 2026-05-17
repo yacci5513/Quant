@@ -11,7 +11,7 @@
 # 서버는 UTC. 모든 시각은 UTC로 환산해서 등록.
 #   KST = UTC + 9
 #   → KST 08:30 월~금 = UTC 23:30 일~목 (요일 -1 주의)
-#   → KST 09:30 월~금 = UTC 00:30 월~금
+#   → KST 10:30 월~금 = UTC 01:30 월~금 (변동성 안정 + 추세 가드)
 #   → KST 16:00 월~금 = UTC 07:00 월~금
 set -euo pipefail
 
@@ -38,8 +38,8 @@ crontab -l 2>/dev/null \
 {
     echo "# quant: daily signal (KST 08:30 월~금 = UTC 23:30 일~목)"
     echo "30 23 * * 0-4 ${DAILY_JOB}"
-    echo "# quant: auto-rebalance (KST 09:30 월~금 = UTC 00:30 월~금)"
-    echo "30 0 * * 1-5 ${AUTO_REBALANCE}"
+    echo "# quant: auto-rebalance (KST 10:30 월~금 = UTC 01:30 월~금) — 추세 가드용 1h 지연"
+    echo "30 1 * * 1-5 ${AUTO_REBALANCE}"
     echo "# quant: evening report (KST 16:00 월~금 = UTC 07:00 월~금)"
     echo "0 7 * * 1-5 ${EVENING_REPORT}"
 } >> "$TMP_CRON"

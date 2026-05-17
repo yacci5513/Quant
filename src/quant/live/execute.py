@@ -41,6 +41,19 @@ from quant.notify.telegram import send_telegram
 # 지정가 매수 시 어제 종가 대비 허용 프리미엄 (슬리피지 방지용 상한)
 BUY_LIMIT_PREMIUM = 0.005  # +0.5%
 
+# 종목별 손절·익절 한도 (KIS 평가손익률 기준, %)
+STOP_LOSS_PCT = -10.0  # -10% 도달 시 손절
+TAKE_PROFIT_PCT = 20.0  # +20% 도달 시 익절
+
+# 포트폴리오 누적 손실 Kill switch (%)
+KILL_SWITCH_PCT = -15.0
+
+# 당일 추세 가드 (당일 변동률 %)
+# 손절 조건이지만 당일 +TREND_GUARD_STOP% 이상 회복 → 손절 보류
+# 익절 조건이지만 당일 +TREND_GUARD_PROFIT% 이상 상승 → 익절 보류 (더 갈 수도)
+TREND_GUARD_STOP = 2.0
+TREND_GUARD_PROFIT = 5.0
+
 # tenacity가 KISError를 재시도 후 RetryError로 wrap해서 던지므로 둘 다 잡아야 함
 _OrderExc = (KISError, RetryError)
 
@@ -106,7 +119,79 @@ def execute_rebalance(
             raw={},
         )
 
-    # 2. Kill switch / 노출 한도 사전 점검
+    def _today_change_pct(ticker: str) -> float:
+        """KIS get_quote의 당일 변동률 (%) — 실패 시 0."""
+        try:
+            return get_quote(ticker).change_pct
+        except Exception:
+            return 0.0
+
+    def _sell_all(reason_per_ticker: dict[str, str]) -> None:
+        """주어진 종목 즉시 시장가 전량 매도. forced 동작."""
+        for ticker, reason in reason_per_ticker.items():
+            h = held_map.get(ticker)
+            if not h:
+                continue
+            notes.append(reason)
+            if dry_run:
+                sells_orders.append(_dry_order(ticker, h.quantity, "sell", h.current_price))
+                continue
+            try:
+                r = order_cash(ticker=ticker, quantity=h.quantity, side="sell", price=None)
+                sells_orders.append(r)
+            except _OrderExc as e:
+                skipped.append(f"매도 실패 {ticker}: {e}")
+
+    # 2a. 포트폴리오 Kill switch — 누적 손익률 < KILL_SWITCH_PCT면 전량 매도
+    port_pp = signal.balance_total_profit_pct
+    if port_pp is not None and port_pp <= KILL_SWITCH_PCT:
+        notes.append(f"🚨 Kill switch — 포트 누적 {port_pp:+.2f}% ≤ {KILL_SWITCH_PCT}%, 전량 매도")
+        _sell_all({h.ticker: f"Kill switch {h.ticker} {h.profit_pct:+.1f}%" for h in holdings})
+        if notify:
+            msg = render_execution_result(
+                ExecutionResult(sells=sells_orders, buys=buys_orders, skipped=skipped, notes=notes),
+                signal_type=AlertType.KILL_SWITCH,
+                dry_run=dry_run,
+            )
+            try:
+                send_telegram(msg)
+            except Exception as e:
+                logger.warning(f"텔레그램 발송 실패: {e}")
+        return ExecutionResult(sells=sells_orders, buys=buys_orders, skipped=skipped, notes=notes)
+
+    # 2b. 종목별 손절·익절 (당일 추세 가드 포함) — 시그널과 별개
+    forced_sells: set[str] = set()
+    for h in holdings:
+        pp = h.profit_pct
+        if pp is None:
+            continue
+        hit_stop = pp <= STOP_LOSS_PCT
+        hit_take = pp >= TAKE_PROFIT_PCT
+        if not (hit_stop or hit_take):
+            continue
+        today_chg = _today_change_pct(h.ticker)
+        # 손절: 당일 +X% 회복 추세면 보류
+        if hit_stop and today_chg >= TREND_GUARD_STOP:
+            notes.append(f"⏸ {h.ticker} 손절 보류 ({pp:+.1f}%, 당일 {today_chg:+.1f}% 회복 추세)")
+            continue
+        # 익절: 당일 +Y% 상승 추세면 보류 (더 갈 수도)
+        if hit_take and today_chg >= TREND_GUARD_PROFIT:
+            notes.append(f"⏸ {h.ticker} 익절 보류 ({pp:+.1f}%, 당일 {today_chg:+.1f}% 상승 추세)")
+            continue
+        reason = "💰 손절" if hit_stop else "🎯 익절"
+        notes.append(f"{reason} {h.ticker} {pp:+.1f}% (당일 {today_chg:+.1f}%)")
+        if dry_run:
+            sells_orders.append(_dry_order(h.ticker, h.quantity, "sell", h.current_price))
+            forced_sells.add(h.ticker)
+            continue
+        try:
+            r = order_cash(ticker=h.ticker, quantity=h.quantity, side="sell", price=None)
+            sells_orders.append(r)
+            forced_sells.add(h.ticker)
+        except _OrderExc as e:
+            skipped.append(f"매도 실패 {h.ticker}: {e}")
+
+    # 2c. 시그널 처리 (LIQUIDATE / NORMAL / REBALANCE)
     if signal.alert_type is AlertType.LIQUIDATE:
         notes.append("청산 신호 — 모든 보유 시장가 매도")
         for h in holdings:
@@ -120,10 +205,10 @@ def execute_rebalance(
                 skipped.append(f"매도 실패 {h.ticker}: {e}")
 
     elif signal.alert_type in {AlertType.NORMAL, AlertType.REBALANCE}:
-        # 시그널 보유 종목 vs 실제 보유 차이
+        # 시그널 보유 종목 vs 실제 보유 차이 (단 손절·익절로 이미 매도된 종목은 제외)
         target_tickers = {h.ticker: h for h in signal.holdings if h.target_shares}
         target_set = set(target_tickers.keys())
-        actual_set = set(held_map.keys())
+        actual_set = set(held_map.keys()) - forced_sells
 
         # 매도: 실제 보유 - 시그널 보유
         for ticker in actual_set - target_set:
@@ -137,10 +222,12 @@ def execute_rebalance(
             except _OrderExc as e:
                 skipped.append(f"매도 실패 {ticker}: {e}")
 
-        # 매수: 시그널 보유 - 실제 보유 + 부족분
+        # 매수: 시그널 보유 - 실제 보유 + 부족분 (손절된 종목은 같은 날 재매수 X)
         # 지정가 = 어제 종가 × (1 + BUY_LIMIT_PREMIUM), 호가 단위 라운드
         # 슬리피지 방지. 단 가격 급등 시 미체결 가능 (다음날 09:30 재시도)
         for ticker in target_tickers:
+            if ticker in forced_sells:
+                continue  # 손절·익절로 매도된 종목은 같은 날 재매수 안 함
             target = target_tickers[ticker]
             actual_qty = held_map.get(ticker)
             need = target.target_shares - (actual_qty.quantity if actual_qty else 0)
