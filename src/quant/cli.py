@@ -257,12 +257,32 @@ def signal(
     ),
     ma_window: int = typer.Option(100, "--ma", help="시장 레짐 MA (100=챔피언, 200=보수)"),
     rebalance_freq: str = typer.Option("BMS", "--freq", help="리밸런싱: BMS|2W-FRI|BQS"),
+    positions: bool = typer.Option(
+        False,
+        "--positions",
+        "-p",
+        help="장중 매시간 보유 손익 알림 (KIS 잔고 + 종목별 손익률·당일 수익률·통합 잔고)",
+    ),
     telegram: bool = typer.Option(
         False, "--telegram", "-t", help="결과를 텔레그램으로도 발송 (--daily와 함께 사용)"
     ),
 ) -> None:
-    """현재 시점 시그널 — 오늘 매수해야 할 종목 또는 매일 알림 (--daily)."""
+    """현재 시점 시그널 — 오늘 매수해야 할 종목 또는 매일 알림 (--daily) 또는 보유 알림 (--positions)."""
     from quant.strategies.momentum_topn import MomentumTopNConfig
+
+    if positions:
+        from quant.daily_signal import compute_hourly_balance, render_hourly_balance
+
+        hb = compute_hourly_balance()
+        text = render_hourly_balance(hb)
+        typer.echo("\n" + text)
+        if telegram:
+            from quant.notify.telegram import send_telegram
+
+            sent = send_telegram(text, monospace=True)
+            if sent:
+                typer.echo("\n📲 텔레그램 발송 완료")
+        return
 
     if dual:
         from quant.common.config import get_settings

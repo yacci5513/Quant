@@ -1114,6 +1114,126 @@ def _render_extremes_section(dual: DualSignal) -> list[str]:
     ]
 
 
+@dataclass
+class HourlyBalance:
+    """장중 매시간 보유 손익 스냅샷."""
+
+    as_of: pd.Timestamp
+    holdings: list[HoldingRow]
+    balance_total_eval: float | None
+    balance_total_cost: float | None
+    balance_total_profit: float | None
+    balance_total_profit_pct: float | None
+    balance_change_1d_won: float | None
+    balance_change_1d_pct: float | None
+
+
+def compute_hourly_balance() -> HourlyBalance:
+    """KIS 잔고 + 종목별 1일 변동만 가볍게 수집. 시그널 계산 안 함 (빠름)."""
+    from quant.live.client import get_balance, get_quote
+
+    holdings_list = get_balance()
+    balance_map = {h.ticker: h for h in holdings_list}
+    name_map = _ticker_name_map()
+
+    per_ticker_change_won: dict[str, float] = {}
+    for h in holdings_list:
+        try:
+            q = get_quote(h.ticker)
+            per_ticker_change_won[h.ticker] = q.change
+        except Exception:
+            per_ticker_change_won[h.ticker] = 0.0
+
+    rows: list[HoldingRow] = []
+    for ticker, h in balance_map.items():
+        change_won = per_ticker_change_won.get(ticker, 0.0)
+        prdy_close = h.current_price - change_won if change_won else None
+        ret_1d = (change_won / prdy_close) if prdy_close and prdy_close > 0 else None
+        rows.append(
+            HoldingRow(
+                ticker=ticker,
+                name=name_map.get(ticker, h.name or "?"),
+                weight=0.0,
+                last_close=h.current_price,
+                ret_1d=ret_1d,
+                actual_shares=h.quantity,
+                avg_price=h.avg_price,
+                eval_amount=h.eval_amount,
+                profit=h.profit,
+                profit_pct=h.profit_pct,
+            )
+        )
+
+    bal_eval = sum(h.eval_amount for h in balance_map.values()) if balance_map else None
+    bal_cost = sum(h.avg_price * h.quantity for h in balance_map.values()) if balance_map else None
+    bal_profit = (bal_eval - bal_cost) if (bal_eval is not None and bal_cost) else None
+    bal_profit_pct = (
+        (bal_profit / bal_cost * 100.0) if (bal_profit is not None and bal_cost) else None
+    )
+    bal_change_1d_won = (
+        sum(per_ticker_change_won.get(h.ticker, 0.0) * h.quantity for h in balance_map.values())
+        if balance_map
+        else None
+    )
+    bal_change_1d_pct = None
+    if bal_eval is not None and bal_change_1d_won is not None:
+        yesterday_eval = bal_eval - bal_change_1d_won
+        if yesterday_eval > 0:
+            bal_change_1d_pct = bal_change_1d_won / yesterday_eval * 100.0
+
+    return HourlyBalance(
+        as_of=pd.Timestamp.now(tz="Asia/Seoul"),
+        holdings=rows,
+        balance_total_eval=bal_eval,
+        balance_total_cost=bal_cost,
+        balance_total_profit=bal_profit,
+        balance_total_profit_pct=bal_profit_pct,
+        balance_change_1d_won=bal_change_1d_won,
+        balance_change_1d_pct=bal_change_1d_pct,
+    )
+
+
+def render_hourly_balance(hb: HourlyBalance) -> str:
+    """장중 매시간 알림 — 간결: 보유 종목 / 통합 잔고만."""
+    weekday = ("월", "화", "수", "목", "금", "토", "일")[hb.as_of.weekday()]
+    lines = [f"{hb.as_of.strftime('%Y-%m-%d')} ({weekday}) {hb.as_of.strftime('%H:%M')}"]
+
+    lines.append(_hdr("보유 손익"))
+    if not hb.holdings:
+        lines.append("  보유 종목 없음")
+    else:
+        for h in sorted(hb.holdings, key=lambda x: -(x.profit_pct or 0)):
+            name = h.name[:10]
+            shares = h.actual_shares or 0
+            pp_str = f"{h.profit_pct:+5.1f}%" if h.profit_pct is not None else "  —  "
+            today_str = f"오늘 {h.ret_1d * 100:+5.2f}%" if h.ret_1d is not None else "오늘   — "
+            lines.append(f"  {name:<10} {shares:>4}주  {pp_str}  ({today_str})")
+
+    lines.append("")
+    lines.append(_hdr("통합 잔고"))
+    if hb.balance_total_eval is None:
+        lines.append("KIS 잔고 미연동")
+    else:
+        eval_str = _fmt_won_compact(hb.balance_total_eval)
+        cost_str = _fmt_won_compact(hb.balance_total_cost)
+        lines.append(f"평가 {eval_str}원 (매입 {cost_str})")
+        parts = []
+        if hb.balance_change_1d_pct is not None:
+            p = f"오늘 {hb.balance_change_1d_pct:+.2f}%"
+            if hb.balance_change_1d_won is not None:
+                p += f" ({_fmt_signed_won(hb.balance_change_1d_won)})"
+            parts.append(p)
+        if hb.balance_total_profit_pct is not None:
+            p = f"누적 {hb.balance_total_profit_pct:+.2f}%"
+            if hb.balance_total_profit is not None:
+                p += f" ({_fmt_signed_won(hb.balance_total_profit)})"
+            parts.append(p)
+        if parts:
+            lines.append(" / ".join(parts))
+
+    return "\n".join(lines)
+
+
 def render_dual_alert(dual: DualSignal) -> str:
     """Compact 스타일 통합 알림.
 

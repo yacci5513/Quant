@@ -58,6 +58,7 @@ data/positions/
 data/account/
 data/portfolio/
 data/live/
+data/state/  # Kill switch / trailing stop 상태 — 잔고 손익 데이터 포함, 노출 금지
 # data/raw, data/processed 는 디렉토리 자체는 유지(.gitkeep), 내용만 무시
 data/raw/*
 data/processed/*
