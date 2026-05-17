@@ -1194,21 +1194,11 @@ def compute_hourly_balance() -> HourlyBalance:
 
 
 def render_hourly_balance(hb: HourlyBalance) -> str:
-    """장중 매시간 알림 — 간결: 보유 종목 / 통합 잔고만."""
+    """장중 매시간 알림 — 통합 잔고 → 종목별 2줄 (이름 + 수량/매입/누적/오늘)."""
     weekday = ("월", "화", "수", "목", "금", "토", "일")[hb.as_of.weekday()]
     lines = [f"{hb.as_of.strftime('%Y-%m-%d')} ({weekday}) {hb.as_of.strftime('%H:%M')}"]
 
-    lines.append(_hdr("보유 손익"))
-    if not hb.holdings:
-        lines.append("  보유 종목 없음")
-    else:
-        for h in sorted(hb.holdings, key=lambda x: -(x.profit_pct or 0)):
-            name = h.name[:10]
-            shares = h.actual_shares or 0
-            pp_str = f"{h.profit_pct:+5.1f}%" if h.profit_pct is not None else "  —  "
-            today_str = f"오늘 {h.ret_1d * 100:+5.2f}%" if h.ret_1d is not None else "오늘   — "
-            lines.append(f"  {name:<10} {shares:>4}주  {pp_str}  ({today_str})")
-
+    # 통합 잔고 — 가장 위
     lines.append("")
     lines.append(_hdr("통합 잔고"))
     if hb.balance_total_eval is None:
@@ -1230,6 +1220,21 @@ def render_hourly_balance(hb: HourlyBalance) -> str:
             parts.append(p)
         if parts:
             lines.append(" / ".join(parts))
+
+    # 보유 손익 — 종목별 2줄 (이름 / 수량·매입·누적·오늘)
+    lines.append("")
+    lines.append(_hdr("보유 손익"))
+    if not hb.holdings:
+        lines.append("보유 종목 없음")
+    else:
+        for h in sorted(hb.holdings, key=lambda x: -(x.profit_pct or 0)):
+            shares = h.actual_shares or 0
+            cost_won = (h.avg_price or 0) * shares
+            cost_str = f"매입 {cost_won / 10000:,.1f}만"
+            pp_str = f"{h.profit_pct:+.1f}%" if h.profit_pct is not None else "—"
+            today_str = f"오늘 {h.ret_1d * 100:+.2f}%" if h.ret_1d is not None else "오늘 —"
+            lines.append(h.name)
+            lines.append(f"  {shares}주 / {cost_str} / {pp_str} / ({today_str})")
 
     return "\n".join(lines)
 
